@@ -1635,5 +1635,242 @@ return function(G)
         function internal.BustPlotCache() GImPlot3D.Plots:Clear() end
     end
 
+    --------------------------------------------------------------------------
+    -- [SECTION] Setup / Plot Utils (coordinate helpers)
+    --------------------------------------------------------------------------
+    do
+        local P, Q = ImPlot3D.ImPlot3DPoint, ImPlot3D.ImPlot3DQuat
+        local Cond, AxisFlags = ImPlot3D.ImPlot3DCond, ImPlot3D.ImPlot3DAxisFlags
+        local ImHasFlag = internal.ImHasFlag
+        local IM_PI = math.pi
+
+        local function CurrentPlotForSetup(name)
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil and not gp.CurrentPlot.SetupLocked,
+                name .. "() needs to be called after BeginPlot() and before any setup locking functions (e.g. PlotX)!")
+            return gp.CurrentPlot
+        end
+
+        local ANIMATION_ANGULAR_VELOCITY = 2 * 3.1415
+        function internal.CalcAnimationTime(q0, q1)
+            -- Compute the angular distance between orientations
+            local dot_product = math.clamp(q0:Dot(q1), -1.0, 1.0)
+            return 2.0 * math.acos(math.abs(dot_product)) / ANIMATION_ANGULAR_VELOCITY
+        end
+
+        function ImPlot3D.SetupAxis(idx, label, flags)
+            flags = flags or 0
+            local axis = CurrentPlotForSetup("SetupAxis").Axes[idx]
+            if axis.PreviousFlags ~= flags then axis.Flags = flags end
+            axis.PreviousFlags = flags
+            axis:SetLabel(label)
+        end
+
+        function ImPlot3D.SetupAxisLimits(idx, min_lim, max_lim, cond)
+            cond = cond or Cond.Once
+            local plot = CurrentPlotForSetup("SetupAxisLimits")
+            local axis = plot.Axes[idx]
+            if not plot.Initialized or cond == Cond.Always then
+                axis:SetRange(min_lim, max_lim)
+                axis.RangeCond = cond
+                axis.FitThisFrame = false
+                -- Apply equal aspect ratio constraint if needed
+                if ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.Equal) then plot:ApplyEqualAspect(idx) end
+            end
+        end
+
+        function ImPlot3D.SetupAxisFormat(idx, formatter, data)
+            local axis = CurrentPlotForSetup("SetupAxisFormat").Axes[idx]
+            -- [Port] string formatter = printf format (C++ users pass Formatter_Default + fmt implicitly)
+            if type(formatter) == "string" then formatter, data = internal.Formatter_Default, formatter end
+            axis.Formatter = formatter
+            axis.FormatterData = data
+        end
+
+        -- [Port] SetupAxisTicks(idx, values, n_ticks, labels, keep_default) / (idx, v_min, v_max, n_ticks, labels, keep_default)
+        function ImPlot3D.SetupAxisTicks(idx, a, b, c, d, e)
+            local values, n_ticks, labels, keep_default
+            if type(a) == "table" then
+                values, n_ticks, labels, keep_default = a, b or #a, c, d
+            else
+                n_ticks = math.max(c, 2)
+                values = table.create(n_ticks)
+                local step = (b - a) / (n_ticks - 1)
+                for i = 0, n_ticks - 1 do values[i + 1] = a + i * step end -- FillRange
+                labels, keep_default = d, e
+            end
+            local axis = CurrentPlotForSetup("SetupAxisTicks").Axes[idx]
+            axis.ShowDefaultTicks = keep_default or false
+            local fmt = axis.Formatter or internal.Formatter_Default
+            local data = (axis.Formatter and axis.FormatterData) or internal.IMPLOT3D_LABEL_FORMAT
+            internal.AddTicksCustom(values, labels, n_ticks, axis.Ticker, fmt, data)
+        end
+
+        function ImPlot3D.SetupAxes(x_label, y_label, z_label, x_flags, y_flags, z_flags)
+            ImPlot3D.SetupAxis(0, x_label, x_flags)
+            ImPlot3D.SetupAxis(1, y_label, y_flags)
+            ImPlot3D.SetupAxis(2, z_label, z_flags)
+        end
+
+        function ImPlot3D.SetupAxesLimits(x_min, x_max, y_min, y_max, z_min, z_max, cond)
+            cond = cond or Cond.Once
+            ImPlot3D.SetupAxisLimits(0, x_min, x_max, cond)
+            ImPlot3D.SetupAxisLimits(1, y_min, y_max, cond)
+            ImPlot3D.SetupAxisLimits(2, z_min, z_max, cond)
+            if cond == Cond.Once then GImPlot3D.CurrentPlot.FitThisFrame = false end
+        end
+
+        -- [Port] (elevation, azimuth [deg], animate, cond) / (quat, animate, cond) overloads
+        function ImPlot3D.SetupBoxRotation(a, b, c, d)
+            local rotation, animate, cond
+            if type(a) == "number" then
+                rotation, animate, cond = Q.FromElAz(a * IM_PI / 180.0, b * IM_PI / 180.0), c, d
+            else
+                rotation, animate, cond = a, b, c
+            end
+            cond = cond or Cond.Once
+            local plot = CurrentPlotForSetup("SetupBoxRotation")
+            if not plot.Initialized or cond == Cond.Always then
+                if not animate then
+                    plot.Rotation = rotation
+                    plot.AnimationTime = 0.0 -- Force any running rotation animation to stop
+                else
+                    plot.RotationAnimationEnd = rotation
+                    plot.AnimationTime = internal.CalcAnimationTime(plot.Rotation, plot.RotationAnimationEnd)
+                end
+                plot.RotationCond = cond
+            end
+        end
+
+        -- [Port] (elevation, azimuth [deg]) / (quat) overloads
+        function ImPlot3D.SetupBoxInitialRotation(a, b)
+            local rotation = a
+            if type(a) == "number" then rotation = Q.FromElAz(a * IM_PI / 180.0, b * IM_PI / 180.0) end
+            CurrentPlotForSetup("SetupBoxInitialRotation").InitialRotation = rotation
+        end
+
+        function ImPlot3D.SetupBoxScale(x, y, z)
+            local plot = CurrentPlotForSetup("SetupBoxScale")
+            IM_ASSERT(x > 0.0 and y > 0.0 and z > 0.0, "SetupBoxScale() requires all aspect ratios to be greater than 0!")
+            plot.Axes[0].NDCScale = x
+            plot.Axes[1].NDCScale = y
+            plot.Axes[2].NDCScale = z
+        end
+
+        function ImPlot3D.SetupLegend(location, flags)
+            flags = flags or 0
+            CurrentPlotForSetup("SetupLegend")
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentItems ~= nil, "SetupLegend() needs to be called within an itemized context!")
+            local legend = gp.CurrentItems.Legend
+            if legend.PreviousLocation ~= location then legend.Location = location end
+            legend.PreviousLocation = location
+            if legend.PreviousFlags ~= flags then legend.Flags = flags end
+            legend.PreviousFlags = flags
+        end
+
+        -- Convert a position in the plot's NDC to pixels
+        function internal.NDCToPixels(plot, point)
+            local center = plot.PlotRect:GetCenter()
+            local point_pix = plot:GetViewScale() * (plot.Rotation * point)
+            return ImVec2(point_pix.x + center.x, -point_pix.y + center.y) -- Invert y-axis
+        end
+
+        -- Convert a position in the plot's coordinate system to NDC
+        function internal.PlotToNDC(plot, point)
+            local ndc = P(0, 0, 0)
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                local t = axis:PlotToNDC(point[i]) -- normalize to [0, 1]
+                -- Convert to NDC range [-0.5*NDCScale, 0.5*NDCScale]
+                ndc[i] = (if ImHasFlag(axis.Flags, AxisFlags.Invert) then 0.5 - t else t - 0.5) * axis.NDCScale
+            end
+            return ndc
+        end
+
+        -- [Port] body of upstream ImPlot3D::NDCToPlot, split out so it works on an explicit plot
+        function internal.NDCToPlot(plot, point)
+            local out = P(0, 0, 0)
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                local ndc_range = 0.5 * axis.NDCScale
+                local t = if ImHasFlag(axis.Flags, AxisFlags.Invert) then ndc_range - point[i] else point[i] + ndc_range
+                out[i] = axis:NDCToPlot(t / axis.NDCScale)
+            end
+            return out
+        end
+
+        function internal.PlotToPixels(plot, point) return internal.NDCToPixels(plot, internal.PlotToNDC(plot, point)) end
+
+        local function CurrentPlot(name)
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil, name .. "() needs to be called between BeginPlot() and EndPlot()!")
+            ImPlot3D.SetupLock()
+            return gp.CurrentPlot
+        end
+
+        -- [Port] ponytail: state-only SetupLock. Frame bg/title drawing, HandleInput, clip rect and RenderPlotBox
+        -- are skipped until the rendering milestone; ticks use the plot rect as-is.
+        function ImPlot3D.SetupLock()
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil, "SetupLock() needs to be called between BeginPlot() and EndPlot()!")
+            local plot = gp.CurrentPlot
+            if plot.SetupLocked then return end
+            plot.SetupLocked = true
+            -- Set default formatter/locator
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                if axis.Formatter == nil then
+                    axis.Formatter = internal.Formatter_Default
+                    if axis.FormatterData == nil then axis.FormatterData = internal.IMPLOT3D_LABEL_FORMAT end
+                end
+                if axis.Locator == nil then axis.Locator = internal.Locator_Default end
+            end
+            -- Compute canvas/plot rectangle
+            local pad = gp.Style.PlotPadding
+            plot.CanvasRect = G.ImRect(plot.FrameRect.Min + pad, plot.FrameRect.Max - pad)
+            plot.PlotRect = G.ImRect(plot.CanvasRect.Min, plot.CanvasRect.Max)
+            -- Apply equal axis aspect constraint if not approximately equal
+            if ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.Equal) then
+                local xar, yar, zar = plot.Axes[0]:GetAspect(), plot.Axes[1]:GetAspect(), plot.Axes[2]:GetAspect()
+                if not internal.ImAlmostEqual(xar, yar) or not internal.ImAlmostEqual(xar, zar) then
+                    local aspect = (xar + yar + zar) / 3.0
+                    for i = 0, 2 do plot.Axes[i]:SetAspect(aspect) end
+                end
+            end
+            -- Compute ticks
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                if axis.ShowDefaultTicks then
+                    axis.Locator(axis.Ticker, axis.Range, plot:GetViewScale() * axis.NDCScale, axis.Formatter, axis.FormatterData)
+                end
+            end
+            -- Cache axis colors
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                axis.ColorBg = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.AxisBg)
+                axis.ColorHov = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.AxisBgHovered)
+                axis.ColorAct = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.AxisBgActive)
+            end
+            -- Handle animation
+            if plot.AnimationTime > 0.0 then
+                local dt = ImGui.GetIO().DeltaTime
+                local t = math.clamp(dt / plot.AnimationTime, 0.0, 1.0)
+                plot.AnimationTime = math.max(plot.AnimationTime - dt, 0.0)
+                plot.Rotation = Q.Slerp(plot.Rotation, plot.RotationAnimationEnd, t)
+            end
+            plot.Initialized = true
+        end
+
+        function ImPlot3D.PlotToNDC(point) return internal.PlotToNDC(CurrentPlot("PlotToNDC"), point) end
+        function ImPlot3D.NDCToPlot(point) return internal.NDCToPlot(CurrentPlot("NDCToPlot"), point) end
+        function ImPlot3D.NDCToPixels(point) return internal.NDCToPixels(CurrentPlot("NDCToPixels"), point) end
+        -- [Port] (point) / (x, y, z) overloads
+        function ImPlot3D.PlotToPixels(x, y, z)
+            if type(x) == "number" then x = P(x, y, z) end
+            return ImPlot3D.NDCToPixels(ImPlot3D.PlotToNDC(x))
+        end
+    end
+
     return ImPlot3D
 end
