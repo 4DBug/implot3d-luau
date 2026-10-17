@@ -3619,6 +3619,153 @@ return function(G)
             if count < 2 then return end
             internal.PlotLineEx(label_id, internal.GetterXYZ(xs, ys, zs, count, spec.Offset, Stride(spec)), spec)
         end
+
+        -- Shared body of PlotTriangle/PlotQuad/PlotSurface/PlotMesh: fill renderer, line getter, markers
+        local FillFlags = ImPlot3D.ImPlot3DTriangleFlags -- same NoLines/NoFill/NoMarkers bits for all fill items
+        local function FillLinesMarkers(n, getter, fill, line_getter, min_fill)
+            local s = n.Spec
+            if getter.Count >= min_fill and n.RenderFill and fill and not ImHasFlag(s.Flags, FillFlags.NoFill) then
+                fill()
+            end
+            if line_getter and getter.Count >= 2 and n.RenderLine and not ImHasFlag(s.Flags, FillFlags.NoLines) then
+                internal.RenderPrimitivesEx(internal.RendererLine("Segments", line_getter, s.LineWeight), ImGui.GetColorU32(s.LineColor), s.LineColors, 1.0)
+            end
+            if s.Marker ~= M.None and not ImHasFlag(s.Flags, FillFlags.NoMarkers) then internal.RenderColoredMarkers(getter, n) end
+            internal.EndItem()
+        end
+
+        local function PlotPolyEx(label_id, getter, spec, ctor, line_getter, min_fill)
+            if internal.BeginItemEx(label_id, getter, spec, spec.FillColor, spec.Marker) then
+                local n = GImPlot3D.NextItemData
+                local s = n.Spec
+                FillLinesMarkers(n, getter, function()
+                    internal.RenderPrimitivesEx(ctor(getter), ImGui.GetColorU32(s.FillColor), s.FillColors, s.FillAlpha)
+                end, line_getter(getter), min_fill)
+            end
+        end
+        function internal.PlotTriangleEx(label_id, getter, spec)
+            PlotPolyEx(label_id, getter, spec, internal.RendererTriangleFill, internal.GetterTriangleLines, 3)
+        end
+        function internal.PlotQuadEx(label_id, getter, spec)
+            PlotPolyEx(label_id, getter, spec, internal.RendererQuadFill, internal.GetterQuadLines, 4)
+        end
+
+        function ImPlot3D.PlotTriangle(label_id, xs, ys, zs, count, spec)
+            count, spec = Args(xs, count, spec)
+            if count < 3 then return end
+            internal.PlotTriangleEx(label_id, internal.GetterXYZ(xs, ys, zs, count, spec.Offset, Stride(spec)), spec)
+        end
+
+        function ImPlot3D.PlotQuad(label_id, xs, ys, zs, count, spec)
+            count, spec = Args(xs, count, spec)
+            if count < 3 then return end
+            internal.PlotQuadEx(label_id, internal.GetterXYZ(xs, ys, zs, count, spec.Offset, Stride(spec)), spec)
+        end
+
+        function internal.PlotSurfaceEx(label_id, getter, x_count, y_count, scale_min, scale_max, spec)
+            if internal.BeginItemEx(label_id, getter, spec, spec.FillColor, spec.Marker) then
+                local n = GImPlot3D.NextItemData
+                FillLinesMarkers(n, getter, function()
+                    local col = ImGui.GetColorU32(n.Spec.FillColor)
+                    internal.RenderPrimitivesEx(internal.RendererSurfaceFill(getter, x_count, y_count, col, scale_min, scale_max), col)
+                end, internal.GetterSurfaceLines(getter, x_count, y_count), 4)
+            end
+        end
+
+        -- PlotSurface(label_id, xs, ys, zs, x_count, y_count, [scale_min], [scale_max], [spec])
+        -- Grid of x_count * y_count points, row-major (index = x + y * x_count). Fill is colormap-shaded by z
+        -- (over [scale_min, scale_max], or the data's z range when both are 0) unless FillColor/FillColors is set.
+        function ImPlot3D.PlotSurface(label_id, xs, ys, zs, x_count, y_count, scale_min, scale_max, spec)
+            if type(scale_min) == "table" then scale_min, spec = nil, scale_min end
+            spec = spec or ImPlot3D.ImPlot3DSpec()
+            local count = x_count * y_count
+            if count < 4 then return end
+            internal.PlotSurfaceEx(label_id, internal.GetterXYZ(xs, ys, zs, count, spec.Offset, Stride(spec)), x_count, y_count,
+                scale_min or 0.0, scale_max or 0.0, spec)
+        end
+
+        function internal.PlotMeshEx(label_id, getter, getter_triangles, spec)
+            if internal.BeginItemEx(label_id, getter, spec, spec.FillColor, spec.Marker) then
+                local n = GImPlot3D.NextItemData
+                local s = n.Spec
+                -- Mesh lines are only drawn with an explicit LineColor (not the auto item color)
+                FillLinesMarkers(n, getter, function()
+                    internal.RenderPrimitivesEx(internal.RendererTriangleFill(getter_triangles), ImGui.GetColorU32(s.FillColor), s.FillColors, s.FillAlpha)
+                end, if n.IsAutoLine then nil else internal.GetterTriangleLines(getter_triangles), 3)
+            end
+        end
+
+        -- PlotMesh(label_id, vtx_xs, vtx_ys, vtx_zs, idxs, [vtx_count], [idx_count], [spec])
+        -- [Port] idxs is a 1-based Lua array holding 0-based vertex indices, exactly as upstream (idxs[1] == 0 is the
+        -- first vertex), so upstream index data / ImPlot3D.Meshes can be used unchanged.
+        function ImPlot3D.PlotMesh(label_id, vtx_xs, vtx_ys, vtx_zs, idxs, vtx_count, idx_count, spec)
+            if type(vtx_count) == "table" then vtx_count, idx_count, spec = nil, nil, vtx_count end
+            vtx_count, idx_count, spec = vtx_count or #vtx_xs, idx_count or #idxs, spec or ImPlot3D.ImPlot3DSpec()
+            if vtx_count < 3 or idx_count < 3 then return end
+            local getter = internal.GetterXYZ(vtx_xs, vtx_ys, vtx_zs, vtx_count, spec.Offset, Stride(spec))
+            internal.PlotMeshEx(label_id, getter, internal.GetterMeshTriangles(getter, idxs, idx_count), spec)
+        end
+
+        -- PlotImage(label_id, tex_ref, center, axis_u, axis_v, [uv0], [uv1], [tint_col], [spec])
+        -- PlotImage(label_id, tex_ref, p0, p1, p2, p3, [uv0], [uv1], [uv2], [uv3], [tint_col], [spec])
+        -- [Port] tex_ref: ImTextureRef (as ImDrawList:AddImage); a raw ImTextureID is wrapped. Points are ImPlot3DPoint.
+        function ImPlot3D.PlotImage(label_id, tex_ref, a, b, c, d, ...)
+            local p0, p1, p2, p3, uv0, uv1, uv2, uv3, tint, spec
+            if d ~= nil and d.z ~= nil then
+                p0, p1, p2, p3 = a, b, c, d
+                uv0, uv1, uv2, uv3, tint, spec = ...
+                uv0, uv1 = uv0 or ImVec2(0, 0), uv1 or ImVec2(1, 0)
+                uv2, uv3 = uv2 or ImVec2(1, 1), uv3 or ImVec2(0, 1)
+            else
+                local center, u, v = a, b, c
+                local uv_a, uv_b = d, nil
+                uv_b, tint, spec = ...
+                uv_a, uv_b = uv_a or ImVec2(0, 0), uv_b or ImVec2(1, 1)
+                -- Compute corners from center and axes
+                p0 = ImPlot3D.ImPlot3DPoint(center.x - u.x - v.x, center.y - u.y - v.y, center.z - u.z - v.z) -- Bottom-left
+                p1 = ImPlot3D.ImPlot3DPoint(center.x + u.x - v.x, center.y + u.y - v.y, center.z + u.z - v.z) -- Bottom-right
+                p2 = ImPlot3D.ImPlot3DPoint(center.x + u.x + v.x, center.y + u.y + v.y, center.z + u.z + v.z) -- Top-right
+                p3 = ImPlot3D.ImPlot3DPoint(center.x - u.x + v.x, center.y - u.y + v.y, center.z - u.z + v.z) -- Top-left
+                -- Map ImPlot-style 2-point UVs into full 4-corner UVs
+                uv0, uv1, uv2, uv3 = uv_a, ImVec2(uv_b.x, uv_a.y), uv_b, ImVec2(uv_a.x, uv_b.y)
+            end
+            tint = tint or ImVec4(1, 1, 1, 1)
+            if type(tint) == "number" then tint = ImGui.ColorConvertU32ToFloat4(tint) end
+            spec = spec or ImPlot3D.ImPlot3DSpec()
+            if type(tex_ref) ~= "table" then tex_ref = G.ImTextureRef(tex_ref) end
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil, "PlotImage() needs to be called between BeginPlot() and EndPlot()!")
+            ImPlot3D.SetupLock()
+            local getter = internal.GetterXYZ({ p0.x, p1.x, p2.x, p3.x }, { p0.y, p1.y, p2.y, p3.y }, { p0.z, p1.z, p2.z, p3.z }, 4)
+            -- Invert Y from UVs
+            local uvs = { uv0.x, 1 - uv0.y, uv1.x, 1 - uv1.y, uv2.x, 1 - uv2.y, uv3.x, 1 - uv3.y }
+            if internal.BeginItemEx(label_id, getter, spec, tint, spec.Marker) then
+                local tint_col32 = ImGui.ColorConvertFloat4ToU32(tint)
+                internal.GetCurrentItem().Color = tint_col32
+                if bit32.band(tint_col32, G.IM_COL32_A_MASK or 0xFF000000) ~= 0 then
+                    internal.RenderPrimitivesEx(internal.RendererQuadImage(getter, tex_ref, uvs, tint_col32), tint_col32)
+                end
+                internal.EndItem()
+            end
+        end
+
+        -- PlotText(text, x, y, z, [angle], [pix_offset])
+        function ImPlot3D.PlotText(text, x, y, z, angle, pix_offset)
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil, "PlotText() needs to be called between BeginPlot() and EndPlot()!")
+            ImPlot3D.SetupLock()
+            local plot = gp.CurrentPlot
+            if not ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.NoClip) then
+                local a = plot.Axes
+                for i, v in { x, y, z } do
+                    local r = a[i - 1].Range
+                    if not (v >= r.Min and v <= r.Max) then return end
+                end
+            end
+            local p = ImPlot3D.PlotToPixels(x, y, z)
+            if pix_offset then p = ImVec2(p.x + pix_offset.x, p.y + pix_offset.y) end
+            internal.AddTextRotated(ImPlot3D.GetPlotDrawList(), p, angle or 0.0, ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.InlayText), text)
+        end
     end
 
     --------------------------------------------------------------------------
