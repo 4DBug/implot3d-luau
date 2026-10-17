@@ -64,6 +64,10 @@ ImPlot3D.SetupBoxInitialRotation(10, 20)
 ImPlot3D.SetupLegend(ImPlot3D.ImPlot3DLocation.South)
 assert(plot.Items.Legend.Location == ImPlot3D.ImPlot3DLocation.South)
 plot.Axes[2].Flags = ImPlot3D.ImPlot3DAxisFlags.Invert
+-- headless: stub SetupLock's drawing (rendering is covered by t_plot)
+ImGui.GetWindowDrawList = function() return setmetatable({}, { __index = function() return function() end end }) end
+ImGui.PushClipRect = function() end
+I.RenderPlotBox = function() end
 ImPlot3D.SetupLock()
 assert(plot.SetupLocked and plot.Axes[0].Ticker:TickCount() > 0 and plot.Axes[0].Ticker:GetText(0) == "0.0")
 local p = ImPlot3D.ImPlot3DPoint(2.5, 0.3, 175)

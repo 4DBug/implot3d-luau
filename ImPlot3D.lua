@@ -1809,14 +1809,13 @@ return function(G)
             return gp.CurrentPlot
         end
 
-        -- [Port] ponytail: state-only SetupLock. Frame bg/title drawing, HandleInput, clip rect and RenderPlotBox
-        -- are skipped until the rendering milestone; ticks use the plot rect as-is.
         function ImPlot3D.SetupLock()
             local gp = GImPlot3D
             IM_ASSERT(gp.CurrentPlot ~= nil, "SetupLock() needs to be called between BeginPlot() and EndPlot()!")
             local plot = gp.CurrentPlot
             if plot.SetupLocked then return end
             plot.SetupLocked = true
+            local draw_list = ImGui.GetWindowDrawList()
             -- Set default formatter/locator
             for i = 0, 2 do
                 local axis = plot.Axes[i]
@@ -1826,6 +1825,8 @@ return function(G)
                 end
                 if axis.Locator == nil then axis.Locator = internal.Locator_Default end
             end
+            -- Draw frame background
+            draw_list:AddRectFilled(plot.FrameRect.Min, plot.FrameRect.Max, ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.FrameBg))
             -- Compute canvas/plot rectangle
             local pad = gp.Style.PlotPadding
             plot.CanvasRect = G.ImRect(plot.FrameRect.Min + pad, plot.FrameRect.Max - pad)
@@ -1852,6 +1853,12 @@ return function(G)
                 axis.ColorHov = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.AxisBgHovered)
                 axis.ColorAct = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.AxisBgActive)
             end
+            -- Render title
+            if plot:HasTitle() then
+                local col = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.TitleText)
+                internal.AddTextCentered(draw_list, ImVec2(plot.FrameRect:GetCenter().x, plot.CanvasRect.Min.y), col, plot:GetTitle())
+                plot.PlotRect.Min.y += ImGui.GetTextLineHeight() + gp.Style.LabelPadding.y
+            end
             -- Handle animation
             if plot.AnimationTime > 0.0 then
                 local dt = ImGui.GetIO().DeltaTime
@@ -1860,6 +1867,17 @@ return function(G)
                 plot.Rotation = Q.Slerp(plot.Rotation, plot.RotationAnimationEnd, t)
             end
             plot.Initialized = true
+            -- [Port] TODO: HandleInput(plot) (input milestone). Only its input-independent "Handle auto fit" step is ported:
+            for i = 0, 2 do
+                if plot.Axes[i]:IsAutoFitting() then
+                    plot.FitThisFrame = true
+                    plot.Axes[i].FitThisFrame = true
+                end
+            end
+            -- Push plot rect clipping
+            ImGui.PushClipRect(plot.PlotRect.Min, plot.PlotRect.Max, true)
+            -- Render plot box
+            internal.RenderPlotBox(draw_list, plot)
         end
 
         function ImPlot3D.PlotToNDC(point) return internal.PlotToNDC(CurrentPlot("PlotToNDC"), point) end
@@ -2302,6 +2320,144 @@ return function(G)
             internal.RenderTickLabels(draw_list, plot, corners, corners_pix, axis_corners)
             internal.RenderAxisLabels(draw_list, plot, corners, corners_pix, axis_corners)
         end
+    end
+
+    --------------------------------------------------------------------------
+    -- [SECTION] Begin/End Plot
+    --------------------------------------------------------------------------
+    do
+        local Flags = ImPlot3D.ImPlot3DFlags
+
+        function ImPlot3D.BeginPlot(title_id, size, flags)
+            size = size or ImVec2(-1, 0)
+            flags = flags or 0
+            local gp = GImPlot3D
+            IM_ASSERT(gp ~= nil, "No current context. Did you call ImPlot3D::CreateContext() or ImPlot3D::SetCurrentContext()?")
+            IM_ASSERT(gp.CurrentPlot == nil, "Mismatched BeginPlot()/EndPlot()!")
+            local window = ImGui.GetCurrentWindow()
+            -- Skip if needed
+            if window.SkipItems then return false end
+            -- Get or create plot
+            local ID = window:GetID(title_id)
+            local just_created = gp.Plots:GetByKey(ID) == nil
+            gp.CurrentPlot = gp.Plots:GetOrAddByKey(ID)
+            local plot = gp.CurrentPlot
+            gp.CurrentItems = plot.Items
+            -- Populate plot
+            plot.ID = ID
+            plot.Items.ID = ID - 1
+            plot.JustCreated = just_created
+            if just_created then
+                plot.Rotation = plot.InitialRotation
+                plot.FitThisFrame = true
+                for i = 0, 2 do
+                    plot.Axes[i] = internal.ImPlot3DAxis()
+                    plot.Axes[i].FitThisFrame = true
+                end
+            end
+            if plot.PreviousFlags ~= flags then plot.Flags = flags end
+            plot.PreviousFlags = flags
+            plot.SetupLocked = false
+            plot.OpenContextThisFrame = false
+            plot.RotationCond = ImPlot3D.ImPlot3DCond.None
+            -- Populate title
+            plot:SetTitle(title_id)
+            -- Calculate frame size
+            local style = gp.Style
+            local frame_size = ImGui.CalcItemSize(size, style.PlotDefaultSize.x, style.PlotDefaultSize.y)
+            if frame_size.x < style.PlotMinSize.x and size.x < 0.0 then frame_size.x = style.PlotMinSize.x end
+            if frame_size.y < style.PlotMinSize.y and size.y < 0.0 then frame_size.y = style.PlotMinSize.y end
+            -- Create plot ImGui item
+            local cursor = window.DC.CursorPos
+            plot.FrameRect = G.ImRect(ImVec2(cursor.x, cursor.y), cursor + frame_size)
+            ImGui.ItemSize(plot.FrameRect)
+            if not ImGui.ItemAdd(plot.FrameRect, plot.ID, plot.FrameRect) then
+                gp.CurrentPlot, gp.CurrentItems, gp.CurrentItem = nil, nil, nil
+                return false
+            end
+            -- Reset legend
+            local legend = plot.Items.Legend
+            table.clear(legend.Indices)
+            legend.Labels = ""
+            -- Reset axes
+            for i = 0, 2 do plot.Axes[i]:Reset() end
+            -- Push frame rect clipping
+            ImGui.PushClipRect(plot.FrameRect.Min, plot.FrameRect.Max, true)
+            -- [Port] TODO: plot.DrawList (ImDrawList3D) setup, added with items
+            return true
+        end
+
+        function ImPlot3D.EndPlot()
+            local gp = GImPlot3D
+            IM_ASSERT(gp ~= nil, "No current context. Did you call ImPlot3D::CreateContext() or ImPlot3D::SetCurrentContext()?")
+            IM_ASSERT(gp.CurrentPlot ~= nil, "Mismatched BeginPlot()/EndPlot()!")
+            local plot = gp.CurrentPlot
+            -- [Port] TODO: plot.DrawList:SortedMoveToImGuiDrawList() (ImDrawList3D, added with items)
+            -- Handle data fitting
+            if plot.FitThisFrame then
+                plot.FitThisFrame = false
+                if not internal.ImHasFlag(plot.Flags, Flags.Equal) then
+                    -- Apply fit to all axes independently
+                    for i = 0, 2 do
+                        local axis = plot.Axes[i]
+                        if axis.FitThisFrame then
+                            axis.FitThisFrame = false
+                            axis:ApplyFit()
+                        end
+                    end
+                else
+                    -- Fit all axes, then use the one with the highest aspect ratio (units per NDC unit) as reference
+                    local ref_axis, max_aspect = 0, 0.0
+                    for i = 0, 2 do
+                        local axis = plot.Axes[i]
+                        if axis.FitThisFrame then
+                            axis.FitThisFrame = false
+                            axis:ApplyFit()
+                            local aspect = axis:GetAspect()
+                            if aspect > max_aspect then max_aspect, ref_axis = aspect, i end
+                        end
+                    end
+                    plot:ApplyEqualAspect(ref_axis)
+                end
+            end
+            -- Lock setup if not already done
+            ImPlot3D.SetupLock()
+            -- Pop plot rect clipping
+            ImGui.PopClipRect()
+            -- Reset legend hover
+            plot.Items.Legend.Hovered = false
+            -- [Port] TODO: RenderLegend, RenderMousePos, legend/axis/plane/plot context menus
+            -- Pop frame rect clipping
+            ImGui.PopClipRect()
+            -- Reset current plot
+            gp.CurrentPlot, gp.CurrentItems, gp.CurrentItem = nil, nil, nil
+            -- Reset the plot items for the next frame
+            for _, item in plot.Items.ItemPool.Buf do
+                if item then item.SeenThisFrame = false end
+            end
+        end
+
+        local function CurrentPlot(name)
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil, name .. "() needs to be called between BeginPlot() and EndPlot()!")
+            return gp.CurrentPlot
+        end
+
+        function ImPlot3D.GetPlotRectPos()
+            local plot = CurrentPlot("GetPlotRectPos")
+            ImPlot3D.SetupLock()
+            return plot.PlotRect.Min
+        end
+
+        function ImPlot3D.GetPlotRectSize()
+            local plot = CurrentPlot("GetPlotRectSize")
+            ImPlot3D.SetupLock()
+            return plot.PlotRect:GetSize()
+        end
+
+        function ImPlot3D.GetFramePos() return CurrentPlot("GetFramePos").FrameRect.Min end
+        function ImPlot3D.GetFrameSize() return CurrentPlot("GetFrameSize").FrameRect:GetSize() end
+        function ImPlot3D.GetPlotDrawList() return ImGui.GetWindowDrawList() end
     end
 
     return ImPlot3D
