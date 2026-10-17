@@ -3360,6 +3360,112 @@ return function(G)
     end
 
     --------------------------------------------------------------------------
+    -- [SECTION] Markers, PlotScatter, PlotLine
+    -- [Port] marker shapes are flat {x1, y1, x2, y2, ...} arrays
+    -- [Port] PlotX(label_id, xs, ys, zs, count?, spec?): xs/ys/zs are 1-based Lua arrays; count defaults to #xs.
+    -- spec is an ImPlot3DSpec or a plain table of spec fields. Stride is in elements (default 1).
+    --------------------------------------------------------------------------
+    do
+        local M, LineFlags = ImPlot3D.ImPlot3DMarker, ImPlot3D.ImPlot3DLineFlags
+        local ImHasFlag = internal.ImHasFlag
+        local S12, S32 = 0.70710678118, 0.86602540378
+        local FILL = {
+            [M.Circle] = { 1.0, 0.0, 0.809017, 0.58778524, 0.30901697, 0.95105654, -0.30901703, 0.9510565, -0.80901706, 0.5877852,
+                -1.0, 0.0, -0.80901694, -0.58778536, -0.3090171, -0.9510565, 0.30901712, -0.9510565, 0.80901694, -0.5877853 },
+            [M.Square] = { S12, S12, S12, -S12, -S12, -S12, -S12, S12 },
+            [M.Diamond] = { 1, 0, 0, -1, -1, 0, 0, 1 },
+            [M.Up] = { S32, 0.5, 0, -1, -S32, 0.5 },
+            [M.Down] = { S32, -0.5, 0, 1, -S32, -0.5 },
+            [M.Left] = { -1, 0, 0.5, S32, 0.5, -S32 },
+            [M.Right] = { 1, 0, -0.5, S32, -0.5, -S32 },
+        }
+        -- Line markers: closed outlines of the fill shapes as segment pairs, plus the line-only markers
+        local LINE = {
+            [M.Asterisk] = { -S32, -0.5, S32, 0.5, -S32, 0.5, S32, -0.5, 0, -1, 0, 1 },
+            [M.Plus] = { -1, 0, 1, 0, 0, -1, 0, 1 },
+            [M.Cross] = { -S12, -S12, S12, S12, S12, -S12, -S12, S12 },
+        }
+        for m, f in FILL do
+            local n, out = #f // 2, {}
+            for i = 0, n - 1 do
+                local j = (i + 1) % n
+                table.insert(out, f[i * 2 + 1]); table.insert(out, f[i * 2 + 2])
+                table.insert(out, f[j * 2 + 1]); table.insert(out, f[j * 2 + 2])
+            end
+            LINE[m] = out
+        end
+
+        local function RenderMarkers(getter, marker, rend_fill, col_fill, cols_fill, fill_alpha, rend_line, col_line, cols_line, size, sizes, weight)
+            local f = FILL[marker]
+            if rend_fill and f then
+                internal.RenderPrimitivesEx(internal.RendererMarkersFill(getter, f, #f // 2), col_fill, cols_fill, fill_alpha, size, sizes)
+            end
+            local l = LINE[marker]
+            if rend_line and l then
+                internal.RenderPrimitivesEx(internal.RendererMarkersLine(getter, l, #l // 2, weight), col_line, cols_line, 1.0, size, sizes)
+            end
+        end
+        internal.RenderMarkers = RenderMarkers
+
+        function internal.RenderColoredMarkers(getter, n)
+            local s = n.Spec
+            RenderMarkers(getter, s.Marker, n.RenderMarkerFill, ImGui.GetColorU32(s.MarkerFillColor), s.MarkerFillColors, s.FillAlpha,
+                n.RenderMarkerLine, ImGui.GetColorU32(s.MarkerLineColor), s.MarkerLineColors, s.MarkerSize, s.MarkerSizes, s.LineWeight)
+        end
+
+        -- [Port] overload dispatch: (label, xs, ys, zs, [count], [spec])
+        local function Args(xs, count, spec)
+            if type(count) == "table" then count, spec = nil, count end
+            return count or #xs, spec or ImPlot3D.ImPlot3DSpec()
+        end
+        local function Stride(spec) return if spec.Stride == nil or spec.Stride == ImPlot3D.IMPLOT3D_AUTO then 1 else spec.Stride end
+
+        function internal.PlotScatterEx(label_id, getter, spec)
+            if internal.BeginItemEx(label_id, getter, spec, spec.MarkerLineColor, spec.Marker or M.Auto) then
+                local n = GImPlot3D.NextItemData
+                -- Scatter always renders a marker; default to Circle
+                if n.Spec.Marker == M.None then n.Spec.Marker = M.Circle end
+                internal.RenderColoredMarkers(getter, n)
+                internal.EndItem()
+            end
+        end
+
+        function ImPlot3D.PlotScatter(label_id, xs, ys, zs, count, spec)
+            count, spec = Args(xs, count, spec)
+            if count < 1 then return end
+            internal.PlotScatterEx(label_id, internal.GetterXYZ(xs, ys, zs, count, spec.Offset, Stride(spec)), spec)
+        end
+
+        function internal.PlotLineEx(label_id, getter, spec)
+            if internal.BeginItemEx(label_id, getter, spec, spec.LineColor, spec.Marker or M.Auto) then
+                local n = GImPlot3D.NextItemData
+                local s = n.Spec
+                local flags = s.Flags
+                if getter.Count >= 2 and n.RenderLine then
+                    local col = ImGui.GetColorU32(s.LineColor)
+                    local kind, g = "Strip", getter
+                    if ImHasFlag(flags, LineFlags.Segments) then
+                        kind = "Segments"
+                    else
+                        if ImHasFlag(flags, LineFlags.Loop) then g = internal.GetterLoop(getter) end
+                        if ImHasFlag(flags, LineFlags.SkipNaN) then kind = "StripSkip" end
+                    end
+                    internal.RenderPrimitivesEx(internal.RendererLine(kind, g, s.LineWeight), col, s.LineColors, 1.0)
+                end
+                -- Render markers
+                if s.Marker ~= M.None then internal.RenderColoredMarkers(getter, n) end
+                internal.EndItem()
+            end
+        end
+
+        function ImPlot3D.PlotLine(label_id, xs, ys, zs, count, spec)
+            count, spec = Args(xs, count, spec)
+            if count < 2 then return end
+            internal.PlotLineEx(label_id, internal.GetterXYZ(xs, ys, zs, count, spec.Offset, Stride(spec)), spec)
+        end
+    end
+
+    --------------------------------------------------------------------------
     -- [SECTION] ImDrawList3D
     -- [Port] VtxBuffer is an ImDrawVtxBuffer (same 36-byte vertex layout as ImDrawList), IdxBuffer/ZBuffer are
     -- 1-based Lua arrays sized by IdxSize/ZSize (never shrunk, so no per-frame allocation). Write ptrs are 1-based;
