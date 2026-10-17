@@ -251,6 +251,28 @@ return function(G)
         function internal.ImNan(val) return val ~= val end
         -- Returns always positive modulo (assumes r != 0)
         function internal.ImPosMod(l, r) return (l % r + r) % r end
+        -- Returns true if flag is set
+        function internal.ImHasFlag(set, flag) return bit32.band(set, flag) == flag end
+        local DBL_MAX = G.DBL_MAX
+        -- Returns true if val is NAN or INFINITY
+        function internal.ImNanOrInf(val) return not (val >= -DBL_MAX and val <= DBL_MAX) end
+        -- Turns NANs to 0s
+        function internal.ImConstrainNan(val) if val ~= val then return 0 end return val end
+        -- Turns infinity to floating point maximums (half DBL_MAX to prevent overflow)
+        function internal.ImConstrainInf(val)
+            local max_val = DBL_MAX * 0.5
+            if val >= max_val then return max_val elseif val <= -max_val then return -max_val end
+            return val
+        end
+        internal.DBL_MIN = 2.2250738585072014e-308
+        internal.DBL_EPSILON = 2.220446049250313e-16
+        -- True if two numbers are approximately equal using units in the last place.
+        function internal.ImAlmostEqual(v1, v2, ulp)
+            ulp = ulp or 2
+            local d = math.abs(v1 - v2)
+            return d < internal.DBL_EPSILON * math.abs(v1 + v2) * ulp or d < internal.DBL_MIN
+        end
+        internal.IMPLOT3D_LABEL_FORMAT = "%g"
     end
 
     --------------------------------------------------------------------------
@@ -1197,6 +1219,122 @@ return function(G)
         end
 
         function ImPlot3D.SampleColormap(t, cmap) return ImGui.ColorConvertU32ToFloat4(internal.SampleColormapU32(t, cmap)) end
+    end
+
+    --------------------------------------------------------------------------
+    -- [SECTION] ImPlot3DTicker, Formatter, Locator
+    -- [Port] ImPlot3DFormatter is `function(value, data) -> string` (no char buffer).
+    --------------------------------------------------------------------------
+    do
+        -- Tick mark info
+        function internal.ImPlot3DTick(value, major, show_label)
+            return { PlotPos = value, Major = major, ShowLabel = show_label, LabelSize = ImVec2(0, 0), TextOffset = -1, Idx = 0, Label = nil }
+        end
+
+        local Ticker = {}
+        Ticker.__index = Ticker
+
+        -- Collection of ticks
+        -- [Port] TextBuffer replaced by per-tick Label strings; TextOffset kept (0 when labelled) for parity.
+        function internal.ImPlot3DTicker() return setmetatable({ Ticks = {} }, Ticker) end
+
+        -- [Port] AddTick(value, major, show_label, label) / (..., formatter, data) / (tick) overloads
+        function Ticker:AddTick(value, major, show_label, fmt, data)
+            local tick
+            if type(value) == "table" then
+                tick = value
+            else
+                tick = internal.ImPlot3DTick(value, major, show_label)
+                local label
+                if show_label and type(fmt) == "string" then
+                    label = fmt
+                elseif show_label and fmt ~= nil then
+                    label = fmt(tick.PlotPos, data)
+                end
+                if label ~= nil then
+                    tick.TextOffset = 0
+                    tick.Label = label
+                    tick.LabelSize = ImGui.CalcTextSize(label)
+                end
+            end
+            tick.Idx = #self.Ticks
+            table.insert(self.Ticks, tick)
+            return tick
+        end
+
+        -- [Port] accepts 0-based index or tick
+        function Ticker:GetText(idx)
+            if type(idx) == "table" then idx = idx.Idx end
+            return self.Ticks[idx + 1].Label or ""
+        end
+        function Ticker:Reset() table.clear(self.Ticks) end
+        function Ticker:TickCount() return #self.Ticks end
+
+        -- Formatter_Default: data is a printf format string
+        function internal.Formatter_Default(value, data) return string.format(data, value) end
+
+        local function IM_ROUND(x) return math.floor(x + 0.5) end
+
+        function internal.NiceNum(x, round)
+            local expv = math.floor(math.log10(x))
+            local f = x / 10 ^ expv
+            local nf
+            if round then
+                if f < 1.5 then nf = 1 elseif f < 3 then nf = 2 elseif f < 7 then nf = 5 else nf = 10 end
+            else
+                if f <= 1 then nf = 1 elseif f <= 2 then nf = 2 elseif f <= 5 then nf = 5 else nf = 10 end
+            end
+            return nf * 10 ^ expv
+        end
+
+        function internal.Locator_Default(ticker, range, pixels, formatter, formatter_data)
+            if range.Min == range.Max then return end
+            local nMinor = math.min(math.max(1, IM_ROUND(pixels / 30.0)), 5)
+            local nMajor = math.max(2, IM_ROUND(pixels / 80.0))
+            local max_ticks_labels = 7
+            local nice_range = internal.NiceNum(range:Size() * 0.99, false)
+            local interval = internal.NiceNum(nice_range / (nMajor - 1), true)
+            local graphmin = math.floor(range.Min / interval) * interval
+            local graphmax = math.ceil(range.Max / interval) * interval
+            local first_major_set = false
+            local first_major_idx = 0
+            local idx0 = ticker:TickCount() -- Ticker may have user custom ticks
+            local major = graphmin
+            while major < graphmax + 0.5 * interval do
+                -- Is this zero? combat zero formatting issues
+                if major - interval < 0 and major + interval > 0 then major = 0 end
+                if range:Contains(major) then
+                    if not first_major_set then
+                        first_major_idx = ticker:TickCount()
+                        first_major_set = true
+                    end
+                    ticker:AddTick(major, true, true, formatter, formatter_data)
+                end
+                for i = 1, nMinor - 1 do
+                    local minor = major + i * interval / nMinor
+                    if range:Contains(minor) then
+                        ticker:AddTick(minor, false, true, formatter, formatter_data)
+                    end
+                end
+                major += interval
+            end
+            -- Prune tick labels
+            if ticker:TickCount() > max_ticks_labels then
+                for i = first_major_idx - 1, idx0, -2 do ticker.Ticks[i + 1].ShowLabel = false end
+                for i = first_major_idx + 1, ticker:TickCount() - 1, 2 do ticker.Ticks[i + 1].ShowLabel = false end
+            end
+        end
+
+        -- [Port] values/labels are 1-based arrays
+        function internal.AddTicksCustom(values, labels, n, ticker, formatter, data)
+            for i = 1, n do
+                if labels ~= nil then
+                    ticker:AddTick(values[i], false, true, labels[i])
+                else
+                    ticker:AddTick(values[i], false, true, formatter, data)
+                end
+            end
+        end
     end
 
     return ImPlot3D
