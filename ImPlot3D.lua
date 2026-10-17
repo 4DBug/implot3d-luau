@@ -1809,6 +1809,255 @@ return function(G)
             return gp.CurrentPlot
         end
 
+        local MOUSE_CURSOR_DRAG_THRESHOLD = 5.0
+        local axis_contexts = { [0] = "##XAxisContext", "##YAxisContext", "##ZAxisContext" }
+        local plane_contexts = { [0] = "##YZPlaneContext", "##XZPlaneContext", "##XYPlaneContext" }
+        internal.axis_contexts, internal.plane_contexts = axis_contexts, plane_contexts
+        -- Map edge index to the two faces it belongs to, and corresponding plane: {face_index, plane}
+        local edge_to_faces = {
+            [0] = { { 1, 1 }, { 2, 2 } }, { { 2, 2 }, { 3, 0 } }, { { 2, 2 }, { 4, 1 } }, { { 0, 0 }, { 2, 2 } },
+            { { 1, 1 }, { 5, 2 } }, { { 3, 0 }, { 5, 2 } }, { { 4, 1 }, { 5, 2 } }, { { 0, 0 }, { 5, 2 } },
+            { { 0, 0 }, { 1, 1 } }, { { 1, 1 }, { 3, 0 } }, { { 3, 0 }, { 4, 1 } }, { { 0, 0 }, { 4, 1 } },
+        }
+
+        -- [Port] translates plot.Axes[i] along the interaction plane by reprojecting its range extremes (pan) or
+        -- scaling them around the mouse (zoom); shared body of upstream's two identical inline blocks
+        local function ReprojectRange(plot, i, mouse_pos_plot, mouse_plane, f)
+            local axis = plot.Axes[i]
+            local p_min, p_max = mouse_pos_plot:Copy(), mouse_pos_plot:Copy()
+            p_min[i], p_max[i] = axis.Range.Min, axis.Range.Max
+            local pix_min, pix_max = f(internal.PlotToPixels(plot, p_min), internal.PlotToPixels(plot, p_max))
+            return ImPlot3D.PixelsToPlotPlane(pix_min, mouse_plane, false)[i], ImPlot3D.PixelsToPlotPlane(pix_max, mouse_plane, false)[i]
+        end
+
+        -- [Port] ROTATION part of upstream HandleInput, split out for size
+        function internal.HandleInputRotation(plot, hovered_plane, active_faces, allow_rotate)
+            local MB = G.ImGuiMouseButton
+            -- Handle reset rotation with right mouse double click (animate to face the hovered plane)
+            if plot.Held and ImGui.IsMouseDoubleClicked(MB.Right) and not plot:IsRotationLocked() and allow_rotate then
+                local rot_end = plot.Rotation
+                if hovered_plane == -1 then
+                    rot_end = plot.InitialRotation
+                else
+                    -- Compute plane normal
+                    local axis_normal = P(0, 0, 0)
+                    axis_normal[hovered_plane] = if active_faces[hovered_plane] == 1 then -1.0 else 1.0
+                    if ImHasFlag(plot.Axes[hovered_plane].Flags, AxisFlags.Invert) then axis_normal[hovered_plane] *= -1 end
+                    -- Compute rotation to align the plane normal with the z-axis
+                    rot_end = Q.FromTwoVectors(rot_end * axis_normal, P(0, 0, 1)) * rot_end
+                    if hovered_plane ~= 2 then
+                        -- Compute rotation to point z-axis up
+                        rot_end = Q.FromTwoVectors(rot_end * P(0, 0, 1), P(0, 1, 0)) * rot_end
+                    else
+                        -- Find the axis most aligned with the up direction
+                        local up = P(0, 1, 0)
+                        local best, best_dot = nil, -math.huge
+                        for _, v in { P(1, 0, 0), P(0, 1, 0), P(-1, 0, 0), P(0, -1, 0) } do
+                            local a = rot_end * v
+                            local d = a:Dot(up)
+                            if d > best_dot then best, best_dot = a, d end
+                        end
+                        rot_end = Q.FromTwoVectors(best, up) * rot_end
+                    end
+                end
+                plot.RotationAnimationEnd = rot_end
+                plot.AnimationTime = internal.CalcAnimationTime(plot.Rotation, plot.RotationAnimationEnd)
+            end
+            -- Handle rotation with right mouse dragging
+            if plot.Held and ImGui.IsMouseDown(MB.Right) and not plot:IsRotationLocked() and allow_rotate then
+                local delta = ImGui.GetIO().MouseDelta
+                -- Map delta to rotation angles (in radians)
+                local angle_x, angle_y = delta.x * (3.1415 / 180.0), delta.y * (3.1415 / 180.0)
+                -- If drag just started, determine and store the rotation axis
+                if plot.DragRotationAxis == P(0, 0, 0) then
+                    local is_upside_down = (plot.Rotation * P(0, 0, 1)).z < 0.0
+                    plot.DragRotationAxis = if is_upside_down then P(0, 0, -1) else P(0, 0, 1)
+                end
+                plot.Rotation = Q(angle_y, P(1, 0, 0)) * plot.Rotation * Q(angle_x, plot.DragRotationAxis)
+                plot.Rotation:Normalize()
+            else
+                -- Reset drag rotation axis when not dragging
+                plot.DragRotationAxis = P(0, 0, 0)
+            end
+        end
+
+        function internal.HandleInput(plot)
+            local Flags, MB = ImPlot3D.ImPlot3DFlags, G.ImGuiMouseButton
+            if ImHasFlag(plot.Flags, Flags.NoInputs) then return end
+            local IO = ImGui.GetIO()
+            local BF = G.ImGuiButtonFlags
+            local plot_button_flags = bit32.bor(BF.AllowOverlap, BF.PressedOnClick, BF.PressedOnDoubleClick, BF.MouseButtonLeft,
+                BF.MouseButtonRight, BF.MouseButtonMiddle)
+            local plot_clicked
+            plot_clicked, plot.Hovered, plot.Held = ImGui.ButtonBehavior(plot.PlotRect, plot.ID, plot_button_flags)
+            -- State
+            local rot_drag = ImGui.GetMouseDragDelta(MB.Right)
+            local rotating = rot_drag.x * rot_drag.x + rot_drag.y * rot_drag.y > MOUSE_CURSOR_DRAG_THRESHOLD
+            local axis_equal = ImHasFlag(plot.Flags, Flags.Equal)
+            local allow_rotate = not ImHasFlag(plot.Flags, Flags.NoRotate)
+            local allow_pan = not ImHasFlag(plot.Flags, Flags.NoPan)
+            local allow_zoom = not ImHasFlag(plot.Flags, Flags.NoZoom)
+            local A = plot.Axes
+
+            -- HOVERING STATE
+            local active_faces, corners_pix, _, plane_2d, axis_corners = internal.GetAxesParameters(plot)
+            local hovered_plane = internal.GetMouseOverPlane(active_faces, corners_pix)
+            local hovered_plane_idx = hovered_plane
+            local hovered_axis, hovered_edge_idx = internal.GetMouseOverAxis(plot, corners_pix, plane_2d, axis_corners)
+            if hovered_axis ~= -1 then hovered_plane_idx, hovered_plane = -1, -1 end
+            -- If the user is no longer pressing the translation/zoom buttons, set axes as not held
+            if not ImGui.IsMouseDown(MB.Left) and not ImGui.IsMouseDown(MB.Middle) then
+                for i = 0, 2 do A[i].Held = false end
+            end
+            -- Reset held edge/plane indices (it will be set if mouse button is down)
+            if not plot.Held then plot.HeldEdgeIdx, plot.HeldPlaneIdx = -1, -1 end
+            -- Check which axes should be transformed (fit/zoom/translate)
+            local any_axis_held = A[0].Held or A[1].Held or A[2].Held
+            if not any_axis_held then
+                -- Only update the transformation axes if the user is not already performing a transformation
+                for i = 0, 2 do
+                    A[i].Hovered = if hovered_axis ~= -1 then i == hovered_axis elseif hovered_plane ~= -1 then i ~= hovered_plane else true
+                end
+            end
+            -- Compute plane that is being hovered by mouse
+            local mouse_plane = 2
+            if plane_2d ~= -1 then
+                mouse_plane = plane_2d
+            elseif A[1].Hovered and A[2].Hovered then
+                mouse_plane = 0
+            elseif A[0].Hovered and A[2].Hovered then
+                mouse_plane = 1
+            elseif A[0].Hovered and A[1].Hovered then
+                mouse_plane = 2
+            elseif plot.HeldEdgeIdx ~= -1 or hovered_edge_idx ~= -1 then
+                -- Single axis hovered: pick the visible (active) face of the two faces sharing the edge
+                local ef = edge_to_faces[if plot.HeldEdgeIdx ~= -1 then plot.HeldEdgeIdx else hovered_edge_idx]
+                local function face_active(f) return if f < 3 then active_faces[f] == 0 else active_faces[f - 3] == 1 end
+                mouse_plane = if not face_active(ef[1][1]) and face_active(ef[2][1]) then ef[2][2] else ef[1][2]
+            end
+            local mouse_pos = ImGui.GetMousePos()
+            local mouse_pos_plot = ImPlot3D.PixelsToPlotPlane(mouse_pos, mouse_plane, false)
+            local function SetHeldIndices()
+                if not any_axis_held then plot.HeldEdgeIdx, plot.HeldPlaneIdx = hovered_edge_idx, hovered_plane_idx end
+            end
+
+            -- AUTO FIT: translation/zoom fit with double click
+            if plot_clicked and (ImGui.IsMouseDoubleClicked(MB.Left) or ImGui.IsMouseDoubleClicked(MB.Middle)) and allow_pan and allow_zoom then
+                plot.FitThisFrame = true
+                for i = 0, 2 do A[i].FitThisFrame = A[i].Hovered end
+            end
+            -- Handle auto fit
+            for i = 0, 2 do
+                if A[i]:IsAutoFitting() then
+                    plot.FitThisFrame = true
+                    A[i].FitThisFrame = true
+                end
+            end
+
+            -- TRANSLATION with left mouse button
+            if plot.Held and ImGui.IsMouseDown(MB.Left) and allow_pan then
+                local delta = IO.MouseDelta
+                if A[0].Hovered and A[1].Hovered and A[2].Hovered then
+                    -- Unconstrained translation on the viewer's plane
+                    local delta_NDC = plot.Rotation:Inverse() * (P(delta.x, -delta.y, 0.0) / plot:GetViewScale())
+                    local p_min_ndc, p_max_ndc = P(0, 0, 0), P(0, 0, 0)
+                    for i = 0, 2 do
+                        local half_scale = 0.5 * A[i].NDCScale
+                        p_min_ndc[i] = -half_scale - delta_NDC[i]
+                        p_max_ndc[i] = half_scale - delta_NDC[i]
+                    end
+                    local p_min_plt, p_max_plt = internal.NDCToPlot(plot, p_min_ndc), internal.NDCToPlot(plot, p_max_ndc)
+                    for i = 0, 2 do
+                        local axis = A[i]
+                        local new_min, new_max = math.min(p_min_plt[i], p_max_plt[i]), math.max(p_min_plt[i], p_max_plt[i])
+                        local increasing = new_min > axis.Range.Min
+                        if (new_min ~= axis.Range.Min or new_max ~= axis.Range.Max) and not axis:IsPanLocked(increasing) then
+                            axis:SetRange(new_min, new_max)
+                            if axis_equal then plot:ApplyEqualAspect(i) end
+                        end
+                        axis.Held = true
+                    end
+                    SetHeldIndices()
+                elseif A[0].Hovered or A[1].Hovered or A[2].Hovered then
+                    -- Translate along plane/axis
+                    for i = 0, 2 do
+                        local axis = A[i]
+                        if axis.Hovered then
+                            local new_min, new_max = ReprojectRange(plot, i, mouse_pos_plot, mouse_plane, function(a, b)
+                                return a - delta, b - delta
+                            end)
+                            local increasing = new_min < axis.Range.Min
+                            if (new_min ~= axis.Range.Min or new_max ~= axis.Range.Max) and not axis:IsPanLocked(increasing) then
+                                axis:SetRange(new_min, new_max)
+                                if axis_equal then plot:ApplyEqualAspect(i) end
+                            end
+                            axis.Held = true
+                        end
+                    end
+                    SetHeldIndices()
+                end
+            end
+
+            -- ROTATION
+            internal.HandleInputRotation(plot, hovered_plane, active_faces, allow_rotate)
+
+            -- ZOOM with mouse wheel / middle drag
+            if plot.Hovered and allow_zoom then
+                ImGui.SetKeyOwner(G.ImGuiKey.MouseWheelY, plot.ID)
+                if ImGui.IsMouseDown(MB.Middle) or IO.MouseWheel ~= 0.0 then
+                    local zoom_rate = if ImGui.IsMouseDown(MB.Middle) then -0.01 * IO.MouseDelta.y else -0.1 * IO.MouseWheel
+                    local zoom_around_mouse = hovered_axis ~= -1 or hovered_plane ~= -1
+                    local ref_axis = 0
+                    for i = 0, 2 do
+                        local axis = A[i]
+                        if axis.Hovered and not axis:IsInputLocked() then
+                            local mouse_pix = internal.PlotToPixels(plot, mouse_pos_plot)
+                            local dmin, dmax
+                            local new_min, new_max = ReprojectRange(plot, i, mouse_pos_plot, mouse_plane, function(a, b)
+                                dmin, dmax = a - mouse_pix, b - mouse_pix
+                                return mouse_pix + dmin * (1.0 + zoom_rate), mouse_pix + dmax * (1.0 + zoom_rate)
+                            end)
+                            local moved = dmin.x ~= 0 or dmin.y ~= 0 or dmax.x ~= 0 or dmax.y ~= 0
+                            if zoom_around_mouse and moved then
+                                axis:SetRange(new_min, new_max)
+                            else
+                                -- Zoom around center
+                                local ndc_limit = 0.5 * axis.NDCScale * (1.0 + zoom_rate)
+                                local ndc_min, ndc_max = P(0, 0, 0), P(0, 0, 0)
+                                ndc_min[i], ndc_max[i] = -ndc_limit, ndc_limit
+                                axis:SetRange(internal.NDCToPlot(plot, ndc_min)[i], internal.NDCToPlot(plot, ndc_max)[i])
+                            end
+                            axis.Held = true
+                            ref_axis = i
+                        end
+                    end
+                    if axis_equal then plot:ApplyEqualAspect(ref_axis) end
+                    SetHeldIndices()
+                end
+            end
+
+            -- CONTEXT MENU with right mouse button
+            if plot.Held and ImGui.IsMouseClicked(MB.Right) and not ImHasFlag(plot.Flags, Flags.NoMenus) then plot.ContextClick = true end
+            if rotating or (ImGui.IsMouseDoubleClicked(MB.Right) and allow_rotate) then plot.ContextClick = false end
+            -- Should not happen if it is a double click action
+            local not_double_click = not allow_rotate or (ImGui.GetTime() - IO.MouseClickedTime[MB.Right]) > IO.MouseDoubleClickTime
+            if plot.Hovered and plot.ContextClick and not_double_click and not ImGui.IsMouseDown(MB.Right) then
+                plot.ContextClick = false
+                plot.OpenContextThisFrame = true
+            end
+            if plot.OpenContextThisFrame then
+                if plot.Items.Legend.Hovered then
+                    ImGui.OpenPopup("##LegendContext")
+                elseif hovered_axis ~= -1 then
+                    ImGui.OpenPopup(axis_contexts[hovered_axis])
+                elseif hovered_plane ~= -1 then
+                    ImGui.OpenPopup(plane_contexts[hovered_plane])
+                elseif plot.Hovered then
+                    ImGui.OpenPopup("##PlotContext")
+                end
+            end
+        end
+
         function ImPlot3D.SetupLock()
             local gp = GImPlot3D
             IM_ASSERT(gp.CurrentPlot ~= nil, "SetupLock() needs to be called between BeginPlot() and EndPlot()!")
@@ -1867,13 +2116,8 @@ return function(G)
                 plot.Rotation = Q.Slerp(plot.Rotation, plot.RotationAnimationEnd, t)
             end
             plot.Initialized = true
-            -- [Port] TODO: HandleInput(plot) (input milestone). Only its input-independent "Handle auto fit" step is ported:
-            for i = 0, 2 do
-                if plot.Axes[i]:IsAutoFitting() then
-                    plot.FitThisFrame = true
-                    plot.Axes[i].FitThisFrame = true
-                end
-            end
+            -- Handle user input
+            internal.HandleInput(plot)
             -- Push plot rect clipping
             ImGui.PushClipRect(plot.PlotRect.Min, plot.PlotRect.Max, true)
             -- Render plot box
