@@ -2067,6 +2067,116 @@ return function(G)
             end
             return active_faces, corners_pix, corners, plane_2d, axis_corners
         end
+
+        -- Spacing constants for axis tick labels and axis labels
+        local AXIS_TICK_INNER_PAD = 5.0 -- gap between axis edge and inner edge of tick labels
+        local AXIS_LABEL_PAD = 10.0 -- gap between tick label outer edge and axis label center
+        local AXIS_RECT_MIN_WIDTH = 40.0 -- minimum hover rect width when labels are absent
+        local AxisFlags = ImPlot3D.ImPlot3DAxisFlags
+        local Col = ImPlot3D.ImPlot3DCol
+
+        -- Computes the maximum extent of tick labels perpendicular to the axis in screen space
+        function internal.ComputeMaxTickLabelExtent(axis)
+            if ImHasFlag(axis.Flags, AxisFlags.NoTickLabels) then return 0.0 end
+            local max_extent = 0.0
+            for _, tick in axis.Ticker.Ticks do
+                if tick.ShowLabel then max_extent = math.max(max_extent, tick.LabelSize.x * 0.5) end
+            end
+            return max_extent
+        end
+
+        -- Computes the total outward width of the hover rect for an axis
+        function internal.ComputeAxisHoverWidth(axis)
+            local w = 2.0 * internal.ComputeMaxTickLabelExtent(axis) + AXIS_TICK_INNER_PAD
+            if axis:HasLabel() then w += AXIS_LABEL_PAD + ImGui.CalcTextSize(axis:GetLabel()).y * 0.5 end
+            return math.max(w, AXIS_RECT_MIN_WIDTH)
+        end
+
+        function internal.RenderPlotBackground(draw_list, plot, corners_pix, active_faces, plane_2d, axis_corners)
+            local col_bg = ImPlot3D.GetStyleColorVec4(Col.PlotBg)
+            local col_bg_hov = col_bg + ImVec4(0.03, 0.03, 0.03, 0.0)
+            -- [Port] TODO: hover highlight needs GetMouseOverPlane/GetMouseOverAxis (input milestone); only the held plane is highlighted
+            local hovered_plane = if plot.Held then plot.HeldPlaneIdx else -1
+            for a = 0, 2 do
+                local idx = faces[a + 3 * active_faces[a]]
+                local col = ImGui.ColorConvertFloat4ToU32(if hovered_plane == a then col_bg_hov else col_bg)
+                draw_list:AddQuadFilled(corners_pix[idx[1]], corners_pix[idx[2]], corners_pix[idx[3]], corners_pix[idx[4]], col)
+            end
+        end
+
+        function internal.RenderAxisRects(draw_list, plot, corners_pix, _, plane_2d, axis_corners)
+            local hovered_axis = -1 -- [Port] TODO: GetMouseOverAxis (input milestone)
+            -- Compute box center in screen space
+            local box_center = ImVec2(0, 0)
+            for i = 0, 7 do box_center = box_center + corners_pix[i] end
+            box_center = box_center * (1.0 / 8.0)
+            for axis_idx = 0, 2 do
+                local idx0, idx1 = axis_corners[axis_idx][1], axis_corners[axis_idx][2]
+                -- In 2D mode, skip the perpendicular axis
+                if not (plane_2d ~= -1 and axis_idx == plane_2d) and idx0 ~= -1 and idx1 ~= -1 then
+                    local axis = plot.Axes[axis_idx]
+                    local p0, p1 = corners_pix[idx0], corners_pix[idx1]
+                    local outward_dir = internal.ComputeEdgeOutwardDir(p0, p1, box_center)
+                    local hover_width = internal.ComputeAxisHoverWidth(axis)
+                    -- Active only when the drag started on this axis rect (HeldEdgeIdx set), not on a plane or outside.
+                    local col
+                    if axis.Held and plot.HeldEdgeIdx ~= -1 then
+                        col = axis.ColorAct
+                    elseif axis_idx == hovered_axis and not plot.Held then
+                        col = axis.ColorHov
+                    else
+                        col = axis.ColorBg
+                    end
+                    -- Draw hover rectangle if color is not transparent
+                    if col ~= 0 then
+                        draw_list:AddQuadFilled(p0, p0 + outward_dir * hover_width, p1 + outward_dir * hover_width, p1, col)
+                    end
+                end
+            end
+        end
+
+        function internal.RenderPlotBorder(draw_list, _, corners_pix, active_faces, plane_2d)
+            -- Determine which edges to render (all visible edges)
+            local render_edge = {}
+            for a = 0, 2 do
+                if not (plane_2d ~= -1 and a ~= plane_2d) then
+                    for _, e in face_edges[a + 3 * active_faces[a]] do render_edge[e] = true end
+                end
+            end
+            local col_bd = ImPlot3D.GetStyleColorU32(Col.PlotBorder)
+            for i = 0, 11 do
+                if render_edge[i] then draw_list:AddLine(corners_pix[edges[i][1]], corners_pix[edges[i][2]], col_bd, 1.0) end
+            end
+        end
+
+        function internal.RenderGrid(draw_list, plot, corners, active_faces, plane_2d)
+            local col_grid = ImPlot3D.GetStyleColorVec4(Col.AxisGrid)
+            local col_grid_minor = ImGui.GetColorU32(ImVec4(col_grid.x, col_grid.y, col_grid.z, col_grid.w * 0.3))
+            local col_grid_major = ImGui.GetColorU32(ImVec4(col_grid.x, col_grid.y, col_grid.z, col_grid.w * 0.6))
+            -- Draw grid lines for ticks of `axis` sweeping from a->b (start) / c->d (end)
+            local function lines(axis, s0, s1, vec)
+                if ImHasFlag(axis.Flags, AxisFlags.NoGridLines) then return end
+                for _, tick in axis.Ticker.Ticks do
+                    local t = (tick.PlotPos - axis.Range.Min) / (axis.Range.Max - axis.Range.Min)
+                    -- Skip ticks that are out of range
+                    if t >= 0.0 and t <= 1.0 then
+                        local p_start = internal.PlotToPixels(plot, s0 + vec * t)
+                        local p_end = internal.PlotToPixels(plot, s1 + vec * t)
+                        draw_list:AddLine(p_start, p_end, if tick.Major then col_grid_major else col_grid_minor)
+                    end
+                end
+            end
+            for face = 0, 2 do
+                if not (plane_2d ~= -1 and face ~= plane_2d) then
+                    local f = faces[face + 3 * active_faces[face]]
+                    -- Corners of the face in plot space; u/v are the two axes that define the face plane
+                    local p0, p1, p3 = corners[f[1]], corners[f[2]], corners[f[4]]
+                    lines(plot.Axes[(face + 1) % 3], p0, p3, p1 - p0) -- along u
+                    lines(plot.Axes[(face + 2) % 3], p0, p1, p3 - p0) -- along v
+                end
+            end
+        end
+        internal.AXIS_TICK_INNER_PAD, internal.AXIS_LABEL_PAD = AXIS_TICK_INNER_PAD, AXIS_LABEL_PAD
     end
 
     return ImPlot3D
