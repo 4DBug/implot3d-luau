@@ -1,0 +1,11 @@
+{
+	"name": "implot3d-luau",
+	"tree": {
+		"$className": "DataModel",
+		"ReplicatedStorage": {
+			"ImGui": { "$path": "tools/core/build/ImGuiTyped.luau", "Impl": { "$path": "tools/core/build/ImGui.luau" } },
+			"ImPlot3D": { "$path": "ImPlot3D.lua" }
+		},
+		"StarterPlayer": { "StarterPlayerScripts": { "ImPlot3DExample": { "$path": "examples/roblox/main.client.luau" } } }
+	}
+}
