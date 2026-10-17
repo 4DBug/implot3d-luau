@@ -531,5 +531,170 @@ return function(G, ImPlot3D)
         end
     end
 
+    -- Cube [0,1]^3 as quads (+x, -x, +y, -y, +z, -z)
+    -- stylua: ignore
+    local unit_quads = {
+        xs = { 1, 1, 1, 1,  0, 0, 0, 0,  0, 1, 1, 0,  0, 1, 1, 0,  0, 1, 1, 0,  0, 1, 1, 0 },
+        ys = { 0, 1, 1, 0,  0, 1, 1, 0,  1, 1, 1, 1,  0, 0, 0, 0,  0, 0, 1, 1,  0, 0, 1, 1 },
+        zs = { 0, 0, 1, 1,  0, 0, 1, 1,  0, 0, 1, 1,  0, 0, 1, 1,  1, 1, 1, 1,  0, 0, 0, 0 },
+    }
+
+    -- Gouraud-shaded duck: per-vertex normals -> point light + ambient, mapped to index-buffer slots
+    local function BuildDuckColors()
+        local m = Meshes.Duck
+        local X, Y, Z, idx = m.VtxXs, m.VtxYs, m.VtxZs, m.Idx
+        local nx, ny, nz = table.create(m.VtxCount, 0), table.create(m.VtxCount, 0), table.create(m.VtxCount, 0)
+        -- Accumulate area-weighted face normals into each vertex
+        for i = 1, m.IdxCount, 3 do
+            local a, b, c = idx[i] + 1, idx[i + 1] + 1, idx[i + 2] + 1
+            local ux, uy, uz = X[b] - X[a], Y[b] - Y[a], Z[b] - Z[a]
+            local vx, vy, vz = X[c] - X[a], Y[c] - Y[a], Z[c] - Z[a]
+            local fx, fy, fz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+            for _, v in { a, b, c } do nx[v] += fx; ny[v] += fy; nz[v] += fz end
+        end
+        local function norm(x, y, z)
+            local len = math.sqrt(x * x + y * y + z * z)
+            if len > 1e-8 then return x / len, y / len, z / len end
+            return 0, 0, 1
+        end
+        -- Lighting: yellow duck (1, 0.85, 0.1), warm white light (1, 0.95, 0.8) at (2, 2, 3), dim warm ambient (0.15, 0.12, 0.03)
+        local vtx_colors = {}
+        for v = 1, m.VtxCount do
+            local ax, ay, az = norm(nx[v], ny[v], nz[v])
+            local lx, ly, lz = norm(2 - X[v], 2 - Y[v], 3 - Z[v])
+            local diff = math.max(0, ax * lx + ay * ly + az * lz)
+            local r = math.min(1, 0.15 + 1.0 * 1.0 * diff)
+            local g = math.min(1, 0.12 + 0.85 * 0.95 * diff)
+            local b = math.min(1, 0.03 + 0.1 * 0.8 * diff)
+            vtx_colors[v] = IM_COL32(math.floor(r * 255), math.floor(g * 255), math.floor(b * 255), 255)
+        end
+        local out = {}
+        for i = 1, m.IdxCount do out[i] = vtx_colors[idx[i] + 1] end
+        return out
+    end
+
+    S.Demo_PerIndexColors = { xs1 = {}, ys1 = {}, zs1 = {}, colors1 = {}, xs2 = {}, ys2 = {}, zs2 = {}, colors2 = {} }
+    function D.Demo_PerIndexColors()
+        IMGUI_DEMO_MARKER("Plots/Per-Index Colors")
+        local s = S.Demo_PerIndexColors
+        local Viridis = Colormap.Viridis
+        local function cm(t, c) return ImGui.GetColorU32(ImPlot3D.SampleColormap(t, c)) end
+        -- Colorful Lines
+        local t = ImGui.GetTime()
+        for i = 1, 1001 do
+            local x = (i - 1) * 0.001
+            s.xs1[i], s.ys1[i], s.zs1[i] = x, 0.5 + 0.5 * math.sin(50 * (x + t / 10)), 0.5 + 0.5 * math.cos(50 * (x + t / 10))
+            s.colors1[i] = HSV_U32((i - 1) / 1000.0, 0.8, 0.9) -- Rainbow colors
+        end
+        for i = 1, 20 do
+            local x = (i - 1) / 19.0
+            s.xs2[i], s.ys2[i], s.zs2[i] = x, x * x, x * x * x
+            s.colors2[i] = cm((i - 1) / 19.0, Viridis) -- Colormap colors (Viridis)
+        end
+        if ImPlot3D.BeginPlot("Colorful Lines") then
+            ImPlot3D.PlotLine("f(x)", s.xs1, s.ys1, s.zs1, 1001, { LineColors = s.colors1 })
+            ImPlot3D.PlotLine("g(x)", s.xs2, s.ys2, s.zs2, 20, { Marker = Marker.Circle, Flags = LineFlags.Segments, LineColors = s.colors2,
+                MarkerFillColors = s.colors2, MarkerLineColors = s.colors2 })
+            ImPlot3D.EndPlot()
+        end
+
+        -- Colorful Scatter
+        if s.sc == nil then
+            srand(0)
+            local sc = { xs1 = {}, ys1 = {}, zs1 = {}, fill1 = {}, line1 = {}, sizes1 = {}, xs2 = {}, ys2 = {}, zs2 = {}, colors2 = {}, sizes2 = {} }
+            for i = 1, 100 do
+                local x = (i - 1) * 0.01
+                sc.xs1[i], sc.ys1[i], sc.zs1[i] = x, x + 0.1 * rand01(), x + 0.1 * rand01()
+                local hue = (i - 1) / 99.0 -- Rainbow hue colors
+                sc.fill1[i], sc.line1[i] = HSV_U32(hue, 0.8, 0.9), HSV_U32(hue, 0.9, 0.7)
+                sc.sizes1[i] = 2.0 + 4.0 * rand01() -- Random sizes between 2 and 6
+            end
+            for i = 1, 50 do
+                sc.xs2[i], sc.ys2[i], sc.zs2[i] = 0.25 + 0.2 * rand01(), 0.50 + 0.2 * rand01(), 0.75 + 0.2 * rand01()
+                sc.colors2[i] = cm((i - 1) / 49.0, Viridis)
+                sc.sizes2[i] = 2.0 + 4.0 * rand01()
+            end
+            -- Colorful Triangles (pyramid, Hot colormap sampled by z) / Colorful Quads (R=x, G=y, B=z)
+            sc.tx, sc.ty, sc.tz = Pyramid()
+            sc.tri_colors, sc.quad_colors = {}, {}
+            for i = 1, 18 do sc.tri_colors[i] = cm(0.5 * sc.tz[i], Colormap.Hot) end
+            local q = unit_quads
+            for i = 1, 24 do sc.quad_colors[i] = IM_COL32(q.xs[i] * 255, q.ys[i] * 255, q.zs[i] * 255, 255) end
+            sc.duck_fill_colors = BuildDuckColors()
+            s.sc = sc
+        end
+        local sc = s.sc
+        if ImPlot3D.BeginPlot("Colorful Scatter") then
+            ImPlot3D.PlotScatter("Data 1", sc.xs1, sc.ys1, sc.zs1, 100, { MarkerFillColors = sc.fill1, MarkerLineColors = sc.line1, MarkerSizes = sc.sizes1 })
+            ImPlot3D.PlotScatter("Data 2", sc.xs2, sc.ys2, sc.zs2, 50, { Marker = Marker.Square, MarkerFillColors = sc.colors2,
+                MarkerLineColors = sc.colors2, MarkerSizes = sc.sizes2, FillAlpha = 0.5 })
+            ImPlot3D.EndPlot()
+        end
+        if ImPlot3D.BeginPlot("Colorful Triangles") then
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -0.5, 1.5)
+            ImPlot3D.PlotTriangle("Pyramid", sc.tx, sc.ty, sc.tz, 18, { FillColors = sc.tri_colors, FillAlpha = 0.8 })
+            ImPlot3D.EndPlot()
+        end
+        if ImPlot3D.BeginPlot("Colorful Quads") then
+            ImPlot3D.SetupAxesLimits(-0.5, 1.5, -0.5, 1.5, -0.5, 1.5)
+            ImPlot3D.PlotQuad("Cube", unit_quads.xs, unit_quads.ys, unit_quads.zs, 24, { FillColors = sc.quad_colors, FillAlpha = 0.8 })
+            ImPlot3D.EndPlot()
+        end
+        if ImPlot3D.BeginPlot("Gouraud Duck") then
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -1, 1)
+            local m = Meshes.Duck
+            ImPlot3D.PlotMesh("Duck", m.VtxXs, m.VtxYs, m.VtxZs, m.Idx, m.VtxCount, m.IdxCount, { FillColors = sc.duck_fill_colors, Flags = MeshFlags.NoLines })
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- [SECTION] Axes
+    ---------------------------------------------------------------------------
+
+    S.DemoBoxScale = { scale = { 1.0, 1.0, 1.0 }, xs = {}, ys = {}, zs = {} }
+    function D.DemoBoxScale()
+        IMGUI_DEMO_MARKER("Axes/Box Scale")
+        local s = S.DemoBoxScale
+        local N = 100
+        for i = 1, N do
+            local t = (i - 1) / (N - 1)
+            s.xs[i], s.ys[i], s.zs[i] = math.sin(t * 2 * IM_PI), math.cos(t * 4 * IM_PI), t * 2 - 1
+        end
+        ImGui.SliderFloat3("Box Scale", s.scale, 0.1, 2.0, "%.2f")
+        if ImPlot3D.BeginPlot("##BoxScale") then
+            ImPlot3D.SetupBoxScale(s.scale[1], s.scale[2], s.scale[3])
+            ImPlot3D.PlotLine("3D Curve", s.xs, s.ys, s.zs, N)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoBoxRotation = { elevation = 45.0, azimuth = -135.0, animate = false, init_elevation = 45.0, init_azimuth = -135.0 }
+    function D.DemoBoxRotation()
+        IMGUI_DEMO_MARKER("Axes/Box Rotation")
+        local s = S.DemoBoxRotation
+        local origin, axis = { 0.0, 0.0 }, { 0.0, 1.0 }
+        ImGui.Text("Rotation")
+        local c1, c2
+        s.elevation, c1 = ImGui.SliderFloat("Elevation", s.elevation, -90.0, 90.0, "%.1f degrees")
+        s.azimuth, c2 = ImGui.SliderFloat("Azimuth", s.azimuth, -180.0, 180.0, "%.1f degrees")
+        local changed = c1 or c2
+        _, s.animate = ImGui.Checkbox("Animate", s.animate)
+        ImGui.Text("Initial Rotation")
+        ImGui.SameLine()
+        HelpMarker("The rotation will be reset to the initial rotation when you double right-click")
+        s.init_elevation = ImGui.SliderFloat("Initial Elevation", s.init_elevation, -90.0, 90.0, "%.1f degrees")
+        s.init_azimuth = ImGui.SliderFloat("Initial Azimuth", s.init_azimuth, -180.0, 180.0, "%.1f degrees")
+        if ImPlot3D.BeginPlot("##BoxRotation") then
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -1, 1, Cond.Always)
+            ImPlot3D.SetupBoxInitialRotation(s.init_elevation, s.init_azimuth)
+            if changed then ImPlot3D.SetupBoxRotation(s.elevation, s.azimuth, s.animate, Cond.Always) end
+            ImPlot3D.PlotLine("X-Axis", axis, origin, origin, 2, { LineColor = ImVec4(0.8, 0.2, 0.2, 1) })
+            ImPlot3D.PlotLine("Y-Axis", origin, axis, origin, 2, { LineColor = ImVec4(0.2, 0.8, 0.2, 1) })
+            ImPlot3D.PlotLine("Z-Axis", origin, origin, axis, 2, { LineColor = ImVec4(0.2, 0.2, 0.8, 1) })
+            ImPlot3D.EndPlot()
+        end
+    end
+
     -- @@TAIL@@
 end
