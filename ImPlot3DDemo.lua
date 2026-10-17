@@ -878,5 +878,151 @@ return function(G, ImPlot3D)
         end
     end
 
+    ---------------------------------------------------------------------------
+    -- [SECTION] Custom
+    ---------------------------------------------------------------------------
+
+    -- [Port] ImPlot3DStyle copy assignment (deep, into dst so GetStyle() references stay valid)
+    local function CopyStyle(dst, src)
+        for k, v in src do
+            if k == "Colors" then
+                dst.Colors = dst.Colors or {}
+                for i, c in v do dst.Colors[i] = ImVec4(c.x, c.y, c.z, c.w) end
+            elseif type(v) == "table" then
+                dst[k] = ImVec2(v.x, v.y)
+            else
+                dst[k] = v
+            end
+        end
+        return dst
+    end
+
+    -- Example for Custom Styles section (MyImPlot3D::StyleSeaborn)
+    local function StyleSeaborn()
+        local style = ImPlot3D.GetStyle()
+        local colors, Col = style.Colors, ImPlot3D.ImPlot3DCol
+        colors[Col.FrameBg] = ImVec4(1.00, 1.00, 1.00, 1.00)
+        colors[Col.PlotBg] = ImVec4(0.92, 0.92, 0.95, 1.00)
+        colors[Col.PlotBorder] = ImVec4(0.00, 0.00, 0.00, 0.00)
+        colors[Col.LegendBg] = ImVec4(0.92, 0.92, 0.95, 1.00)
+        colors[Col.LegendBorder] = ImVec4(0.80, 0.81, 0.85, 1.00)
+        colors[Col.LegendText] = ImVec4(0.00, 0.00, 0.00, 1.00)
+        colors[Col.TitleText] = ImVec4(0.00, 0.00, 0.00, 1.00)
+        colors[Col.InlayText] = ImVec4(0.00, 0.00, 0.00, 1.00)
+        colors[Col.AxisText] = ImVec4(0.00, 0.00, 0.00, 1.00)
+        colors[Col.AxisGrid] = ImVec4(1.00, 1.00, 1.00, 1.00)
+        style.LineWeight = 1.5
+        style.Marker = Marker.None
+        style.MarkerSize = 4
+        style.FillAlpha = 1.0
+        style.PlotPadding = ImVec2(12, 12)
+        style.LabelPadding = ImVec2(5, 5)
+        style.LegendPadding = ImVec2(5, 5)
+        style.PlotMinSize = ImVec2(300, 225)
+    end
+    ImPlot3D.StyleSeaborn = StyleSeaborn
+
+    local seaborn = { xs = { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, ys = table.create(10, 0), lin = { 8, 8, 9, 7, 8, 8, 8, 9, 7, 8 },
+        dot = { 7, 6, 6, 7, 8, 5, 6, 5, 8, 7 } }
+    function D.DemoCustomStyles()
+        IMGUI_DEMO_MARKER("Custom/Custom Styles")
+        ImPlot3D.PushColormap(Colormap.Deep)
+        -- normally you wouldn't change the entire style each frame
+        local backup = CopyStyle({}, ImPlot3D.GetStyle())
+        StyleSeaborn()
+        if ImPlot3D.BeginPlot("Seaborn Style") then
+            ImPlot3D.SetupAxes("X-axis", "Y-axis", "Z-axis")
+            ImPlot3D.SetupAxesLimits(-0.5, 9.5, -0.5, 0.5, 0, 10)
+            ImPlot3D.NextColormapColor() -- Skip blue
+            ImPlot3D.PlotLine("Line", seaborn.xs, seaborn.ys, seaborn.lin, 10)
+            ImPlot3D.NextColormapColor() -- Skip green
+            ImPlot3D.PlotScatter("Scatter", seaborn.xs, seaborn.ys, seaborn.dot, 10)
+            ImPlot3D.EndPlot()
+        end
+        CopyStyle(ImPlot3D.GetStyle(), backup)
+        ImPlot3D.PopColormap()
+    end
+
+    local box_corners = { P(0, 0, 0), P(1, 0, 0), P(1, 1, 0), P(0, 1, 0), P(0, 0, 1), P(1, 0, 1), P(1, 1, 1), P(0, 1, 1) }
+    function D.DemoCustomRendering()
+        IMGUI_DEMO_MARKER("Custom/Custom Rendering")
+        if ImPlot3D.BeginPlot("##CustomRend") then
+            ImPlot3D.SetupAxesLimits(-0.1, 1.1, -0.1, 1.1, -0.1, 1.1)
+            local dl = ImPlot3D.GetPlotDrawList()
+            -- Draw circle
+            local cntr = ImPlot3D.PlotToPixels(P(0.5, 0.5, 0.5))
+            dl:AddCircleFilled(cntr, 20, IM_COL32(255, 255, 0, 255), 20)
+            -- Draw box
+            local px = {}
+            for i = 1, 8 do px[i] = ImPlot3D.PlotToPixels(box_corners[i]) end
+            local col = IM_COL32(128, 0, 255, 255)
+            for i = 1, 4 do
+                local n = i % 4 + 1
+                dl:AddLine(px[i], px[n], col)
+                dl:AddLine(px[i + 4], px[n + 4], col)
+                dl:AddLine(px[i], px[i + 4], col)
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoCustomOverlay = {}
+    local gizmo_axes = { P(1, 0, 0), P(0, 1, 0), P(0, 0, 1) }
+    local gizmo_colors = { IM_COL32(200, 50, 50, 255), IM_COL32(50, 200, 50, 255), IM_COL32(50, 50, 200, 255) }
+    local gizmo_labels = { "X", "Y", "Z" }
+    function D.DemoCustomOverlay()
+        IMGUI_DEMO_MARKER("Custom/Custom Overlay")
+        local s = S.DemoCustomOverlay
+        ImGui.BulletText("Demonstrates custom 2D overlays using GetPlotRectPos/GetPlotRectSize.")
+        ImGui.BulletText("Shows mouse tooltip, line to closest point, and orientation gizmo.")
+        if s.xs == nil then
+            srand(0)
+            s.xs, s.ys, s.zs = {}, {}, {}
+            for i = 1, 50 do s.xs[i], s.ys[i], s.zs[i] = rand01(), rand01(), rand01() end
+        end
+        if ImPlot3D.BeginPlot("##CustomOverlay", ImVec2(-1, 0)) then
+            ImPlot3D.SetupAxes("X-Axis", "Y-Axis", "Z-Axis")
+            ImPlot3D.SetupAxesLimits(0, 1, 0, 1, 0, 1)
+            ImPlot3D.PlotScatter("Data", s.xs, s.ys, s.zs, 50)
+            local draw_list = ImPlot3D.GetPlotDrawList()
+            local mouse_pos = ImGui.GetMousePos()
+            local plot_pos, plot_size = ImPlot3D.GetPlotRectPos(), ImPlot3D.GetPlotRectSize()
+            if ImGui.IsItemHovered() then
+                -- Find closest point to mouse in screen space
+                local closest_idx, min_dist_sq, closest_px = -1, 1e10, nil
+                for i = 1, 50 do
+                    local pp = ImPlot3D.PlotToPixels(s.xs[i], s.ys[i], s.zs[i])
+                    local dx, dy = pp.x - mouse_pos.x, pp.y - mouse_pos.y
+                    if dx * dx + dy * dy < min_dist_sq then min_dist_sq, closest_idx, closest_px = dx * dx + dy * dy, i, pp end
+                end
+                if closest_idx >= 1 then
+                    draw_list:AddLine(mouse_pos, closest_px, IM_COL32(255, 255, 0, 255), 2.0)
+                    ImGui.BeginTooltip()
+                    ImGui.Text("Mouse: (%.1f, %.1f)", mouse_pos.x, mouse_pos.y)
+                    ImGui.Text("Closest Point #%d", closest_idx - 1)
+                    ImGui.Text("Position: (%.3f, %.3f, %.3f)", s.xs[closest_idx], s.ys[closest_idx], s.zs[closest_idx])
+                    ImGui.Text("Distance: %.1f px", math.sqrt(min_dist_sq))
+                    ImGui.EndTooltip()
+                end
+            end
+            -- Draw orientation gizmo in bottom-right corner
+            local plot = ImPlot3D.internal.GetCurrentPlot()
+            if plot then
+                local gc = ImVec2(plot_pos.x + plot_size.x - 50, plot_pos.y + plot_size.y - 50)
+                local gizmo_size = 30.0
+                draw_list:AddCircleFilled(gc, gizmo_size + 5, IM_COL32(0, 0, 0, 100))
+                for i = 1, 3 do
+                    local rotated = plot.Rotation * gizmo_axes[i] -- Rotate axis by quaternion
+                    -- Project to 2D gizmo space (simple orthographic projection, Y flipped for screen coords)
+                    local axis_end = ImVec2(gc.x + rotated.x * gizmo_size, gc.y - rotated.y * gizmo_size)
+                    draw_list:AddLine(gc, axis_end, gizmo_colors[i], 2.0)
+                    draw_list:AddCircleFilled(axis_end, 4.0, gizmo_colors[i])
+                    draw_list:AddText(ImVec2(axis_end.x + 8, axis_end.y - 8), gizmo_colors[i], gizmo_labels[i])
+                end
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
     -- @@TAIL@@
 end
