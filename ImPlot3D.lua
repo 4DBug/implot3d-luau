@@ -3121,6 +3121,34 @@ return function(G)
         end
         local function GetLoop(g, idx) local inner = g.Getter return inner.Get(inner, idx % (g.Count - 1)) end
         function internal.GetterLoop(getter) return { Getter = getter, Count = getter.Count + 1, Get = GetLoop } end
+        local function GetTriLines(g, idx) local inner = g.Getter return inner.Get(inner, ((idx % 6 + 1) // 2) % 3 + idx // 6 * 3) end
+        function internal.GetterTriangleLines(getter) return { Getter = getter, Count = getter.Count * 2, Get = GetTriLines } end
+        local function GetQuadLines(g, idx) local inner = g.Getter return inner.Get(inner, ((idx % 8 + 1) // 2) % 4 + idx // 8 * 4) end
+        function internal.GetterQuadLines(getter) return { Getter = getter, Count = getter.Count * 2, Get = GetQuadLines } end
+        local function GetSurfaceLines(g, idx)
+            local endpoint_i, segment_i, xc = idx % 2, idx // 2, g.XCount
+            local horizontal_segments = (xc - 1) * g.YCount
+            local px, py
+            if segment_i < horizontal_segments then
+                -- Horizontal segment: endpoints (col, row), (col+1, row)
+                px, py = segment_i % (xc - 1) + endpoint_i, segment_i // (xc - 1)
+            else
+                -- Vertical segment: endpoints (col, row), (col, row+1)
+                local seg_v = segment_i - horizontal_segments
+                px, py = seg_v // (g.YCount - 1), seg_v % (g.YCount - 1) + endpoint_i
+            end
+            local inner = g.Getter
+            return inner.Get(inner, py * xc + px)
+        end
+        function internal.GetterSurfaceLines(getter, x_count, y_count)
+            return { Getter = getter, XCount = x_count, YCount = y_count, Get = GetSurfaceLines,
+                Count = ((x_count - 1) * y_count + (y_count - 1) * x_count) * 2 }
+        end
+        -- [Port] idx is a 1-based Lua array of 0-based vertex indices (upstream semantics)
+        local function GetMeshTri(g, i) local v = g.Getter return v.Get(v, g.Idx[i + 1]) end
+        function internal.GetterMeshTriangles(vtx_getter, idx, idx_count)
+            return { Getter = vtx_getter, Idx = idx, TriCount = idx_count // 3, Count = idx_count, Get = GetMeshTri }
+        end
 
         -- Transform cache (PlotToPixels + GetPointDepth as scalars)
         local ax_tf, ax_td, ax_min, ax_size, ax_inv, ax_ndc = {}, {}, {}, {}, {}, {}
@@ -3192,15 +3220,18 @@ return function(G)
             return ct0, ct1
         end
 
+        -- [Port] ColorConvertU32ToFloat4 -> c.w *= alpha -> ColorConvertFloat4ToU32, without the ImVec4
+        local band, bor, lshift, rshift, floor = bit32.band, bit32.bor, bit32.lshift, bit32.rshift, math.floor
+        local function MulAlpha(col, alpha)
+            return bor(band(col, 0x00FFFFFF), lshift(floor(rshift(col, 24) * alpha + 0.5), 24))
+        end
+        internal.MulAlpha = MulAlpha
+
         local function GetCol(r, prim)
             local cols = r.Cols
             if cols == nil then return r.Col end
             local col = cols[prim + 1]
-            if r.Alpha < 1.0 then
-                local c = ImGui.ColorConvertU32ToFloat4(col)
-                c.w *= r.Alpha
-                col = ImGui.ColorConvertFloat4ToU32(c)
-            end
+            if r.Alpha < 1.0 then col = MulAlpha(col, r.Alpha) end
             return col
         end
 
@@ -3331,6 +3362,131 @@ return function(G)
             return { Prims = getter.Count, IdxConsumed = count // 2 * 6, VtxConsumed = count // 2 * 4,
                 Getter = getter, Marker = marker, Count = count, HalfWeight = max(1.0, weight) * 0.5,
                 Init = LineInit, Render = MarkersLineRender }
+        end
+
+        local function InBox(x, y, z) return x >= bx0 and x <= bx1 and y >= by0 and y <= by1 and z >= bz0 and z <= bz1 end
+        local function Vtx(b, o, x, y, z, u, v, col)
+            local px, py = ToPixels(x, y, z)
+            writef64(b, o, px); writef64(b, o + 8, py); writef64(b, o + 16, u); writef64(b, o + 24, v); writeu32(b, o + 32, col)
+        end
+        -- Two triangles (0,1,2) (0,2,3) for the 4 vertices just written
+        local function QuadIdx(dl, z0, z1)
+            local idx, id, iw = dl._VtxCurrentIdx, dl.IdxBuffer, dl._IdxWritePtr
+            id[iw] = idx; id[iw + 1] = idx + 1; id[iw + 2] = idx + 2
+            id[iw + 3] = idx; id[iw + 4] = idx + 2; id[iw + 5] = idx + 3
+            local zb, zw = dl.ZBuffer, dl._ZWritePtr
+            zb[zw] = z0; zb[zw + 1] = z1
+            dl._VtxWritePtr += 4; dl._IdxWritePtr = iw + 6; dl._VtxCurrentIdx = idx + 4; dl._ZWritePtr = zw + 2
+        end
+
+        local function TriangleFillRender(r, dl, prim)
+            local g, i = r.Getter, 3 * prim
+            local x0, y0, z0 = g.Get(g, i)
+            local x1, y1, z1 = g.Get(g, i + 1)
+            local x2, y2, z2 = g.Get(g, i + 2)
+            if not InBox(x0, y0, z0) and not InBox(x1, y1, z1) and not InBox(x2, y2, z2) then return false end
+            local b, o, u, v = dl.VtxBuffer.Buf, (dl._VtxWritePtr - 1) * VTX_STRIDE, r.U, r.V
+            Vtx(b, o, x0, y0, z0, u, v, GetCol(r, i))
+            Vtx(b, o + VTX_STRIDE, x1, y1, z1, u, v, GetCol(r, i + 1))
+            Vtx(b, o + 2 * VTX_STRIDE, x2, y2, z2, u, v, GetCol(r, i + 2))
+            local idx, id, iw = dl._VtxCurrentIdx, dl.IdxBuffer, dl._IdxWritePtr
+            id[iw] = idx; id[iw + 1] = idx + 1; id[iw + 2] = idx + 2
+            dl.ZBuffer[dl._ZWritePtr] = Depth((x0 + x1 + x2) / 3, (y0 + y1 + y2) / 3, (z0 + z1 + z2) / 3)
+            dl._VtxWritePtr += 3; dl._IdxWritePtr = iw + 3; dl._VtxCurrentIdx = idx + 3; dl._ZWritePtr += 1
+            return true
+        end
+        function internal.RendererTriangleFill(getter)
+            return { Getter = getter, Prims = getter.Count // 3, IdxConsumed = 3, VtxConsumed = 3, Init = WhiteInit, Render = TriangleFillRender }
+        end
+
+        local function QuadFillRender(r, dl, prim)
+            local g, i = r.Getter, 4 * prim
+            local x0, y0, z0 = g.Get(g, i)
+            local x1, y1, z1 = g.Get(g, i + 1)
+            local x2, y2, z2 = g.Get(g, i + 2)
+            local x3, y3, z3 = g.Get(g, i + 3)
+            if not InBox(x0, y0, z0) and not InBox(x1, y1, z1) and not InBox(x2, y2, z2) and not InBox(x3, y3, z3) then return false end
+            local b, o = dl.VtxBuffer.Buf, (dl._VtxWritePtr - 1) * VTX_STRIDE
+            local tex = r.TexRef
+            if tex ~= nil then
+                -- RendererQuadImage: per-corner UVs, constant tint
+                dl:SetTexture(tex)
+                local uv, col = r.UVs, r.Col
+                Vtx(b, o, x0, y0, z0, uv[1], uv[2], col)
+                Vtx(b, o + VTX_STRIDE, x1, y1, z1, uv[3], uv[4], col)
+                Vtx(b, o + 2 * VTX_STRIDE, x2, y2, z2, uv[5], uv[6], col)
+                Vtx(b, o + 3 * VTX_STRIDE, x3, y3, z3, uv[7], uv[8], col)
+            else
+                local u, v = r.U, r.V
+                Vtx(b, o, x0, y0, z0, u, v, GetCol(r, i))
+                Vtx(b, o + VTX_STRIDE, x1, y1, z1, u, v, GetCol(r, i + 1))
+                Vtx(b, o + 2 * VTX_STRIDE, x2, y2, z2, u, v, GetCol(r, i + 2))
+                Vtx(b, o + 3 * VTX_STRIDE, x3, y3, z3, u, v, GetCol(r, i + 3))
+            end
+            local z = Depth((x0 + x1 + x2 + x3) / 4, (y0 + y1 + y2 + y3) / 4, (z0 + z1 + z2 + z3) / 4)
+            QuadIdx(dl, z, z)
+            if tex ~= nil then dl:ResetTexture() end
+            return true
+        end
+        function internal.RendererQuadFill(getter)
+            return { Getter = getter, Prims = getter.Count // 4, IdxConsumed = 6, VtxConsumed = 4, Init = WhiteInit, Render = QuadFillRender }
+        end
+        -- uvs: flat {u0, v0, u1, v1, u2, v2, u3, v3}
+        function internal.RendererQuadImage(getter, tex_ref, uvs, col)
+            return { Getter = getter, Prims = getter.Count // 4, IdxConsumed = 6, VtxConsumed = 4, Init = WhiteInit,
+                Render = QuadFillRender, TexRef = tex_ref, UVs = uvs, Col = col }
+        end
+
+        local function SurfaceInit(r)
+            WhiteInit(r)
+            -- Compute min and max values for the colormap (if not solid fill)
+            local n = GImPlot3D.NextItemData
+            r.N = n
+            if n.IsAutoFill then
+                local g, lo, hi = r.Getter, HUGE, -HUGE
+                for i = 0, g.Count - 1 do
+                    local _, _, z = g.Get(g, i)
+                    lo = min(lo, z); hi = max(hi, z)
+                end
+                r.Min, r.Max = lo, hi
+            end
+        end
+        local SampleU32
+        local function SurfaceCol(r, vi, z)
+            local s = r.N.Spec
+            if s.FillColors ~= nil then return MulAlpha(s.FillColors[vi + 1], s.FillAlpha) end
+            if r.N.IsAutoFill then
+                local lo, hi = r.Min, r.Max
+                if r.ScaleMin ~= 0.0 or r.ScaleMax ~= 0.0 then lo, hi = r.ScaleMin, r.ScaleMax end
+                local t = if hi == lo then 0 else (z - lo) / (hi - lo) -- ImRemap01
+                SampleU32 = SampleU32 or internal.SampleColormapU32
+                return MulAlpha(SampleU32(math.clamp(t, 0.0, 1.0)), s.FillAlpha)
+            end
+            return r.Col
+        end
+        local function SurfaceFillRender(r, dl, prim)
+            local xc = r.XCount
+            local x, y = prim % (xc - 1), prim // (xc - 1)
+            local i0, i1, i2, i3 = x + y * xc, x + 1 + y * xc, x + 1 + (y + 1) * xc, x + (y + 1) * xc
+            local g = r.Getter
+            local x0, y0, z0 = g.Get(g, i0)
+            local x1, y1, z1 = g.Get(g, i1)
+            local x2, y2, z2 = g.Get(g, i2)
+            local x3, y3, z3 = g.Get(g, i3)
+            if not InBox(x0, y0, z0) and not InBox(x1, y1, z1) and not InBox(x2, y2, z2) and not InBox(x3, y3, z3) then return false end
+            local b, o, u, v = dl.VtxBuffer.Buf, (dl._VtxWritePtr - 1) * VTX_STRIDE, r.U, r.V
+            Vtx(b, o, x0, y0, z0, u, v, SurfaceCol(r, i0, z0))
+            Vtx(b, o + VTX_STRIDE, x1, y1, z1, u, v, SurfaceCol(r, i1, z1))
+            Vtx(b, o + 2 * VTX_STRIDE, x2, y2, z2, u, v, SurfaceCol(r, i2, z2))
+            Vtx(b, o + 3 * VTX_STRIDE, x3, y3, z3, u, v, SurfaceCol(r, i3, z3))
+            QuadIdx(dl, Depth((x0 + x1 + x2) / 3, (y0 + y1 + y2) / 3, (z0 + z1 + z2) / 3),
+                Depth((x0 + x2 + x3) / 3, (y0 + y2 + y3) / 3, (z0 + z2 + z3) / 3))
+            return true
+        end
+        function internal.RendererSurfaceFill(getter, x_count, y_count, col, scale_min, scale_max)
+            return { Getter = getter, Prims = (x_count - 1) * (y_count - 1), IdxConsumed = 6, VtxConsumed = 4, Min = 0, Max = 0,
+                XCount = x_count, YCount = y_count, Col = col, ScaleMin = scale_min, ScaleMax = scale_max,
+                Init = SurfaceInit, Render = SurfaceFillRender }
         end
 
         -- [Port] color getter (GetterConstColor/GetterIdxColor) and size getter folded into renderer fields
