@@ -1245,5 +1245,290 @@ return function(G, ImPlot3D)
         return p_open
     end
 
-    -- @@TAIL@@
+    ---------------------------------------------------------------------------
+    -- [SECTION] Style Editor
+    ---------------------------------------------------------------------------
+
+    local internal = ImPlot3D.internal
+    local ImGuiCol, CEF = G.ImGuiCol, G.ImGuiColorEditFlags
+
+    -- ColormapButton(label, size_arg, cmap) -> pressed
+    function ImPlot3D.ColormapButton(label, size_arg, cmap)
+        local style = ImGui.GetStyle()
+        local Window = ImGui.GetCurrentWindow()
+        if Window.SkipItems then return false end
+        local gp = ImPlot3D.GetCurrentContext()
+        cmap = internal.ResolveColormap(gp, cmap)
+        local keys, off = gp.ColormapData:GetKeys(cmap)
+        local pos = Window.DC.CursorPos
+        local label_size = ImGui.CalcTextSize(label, nil, true)
+        local size = ImGui.CalcItemSize(size_arg, label_size.x + style.FramePadding.x * 2.0, label_size.y + style.FramePadding.y * 2.0)
+        local rect = G.ImRect(pos.x, pos.y, pos.x + size.x, pos.y + size.y)
+        internal.RenderColorBar(keys, off, gp.ColormapData:GetKeyCount(cmap), ImGui.GetWindowDrawList(), rect, false, false,
+            not gp.ColormapData:IsQual(cmap))
+        local text = internal.CalcTextColor(gp.ColormapData:LerpTable(cmap, style.ButtonTextAlign.x))
+        ImGui.PushStyleColor(ImGuiCol.Button, G.IM_COL32_BLACK_TRANS)
+        ImGui.PushStyleColor(ImGuiCol.ButtonHovered, ImVec4(1, 1, 1, 0.1))
+        ImGui.PushStyleColor(ImGuiCol.ButtonActive, ImVec4(1, 1, 1, 0.2))
+        ImGui.PushStyleColor(ImGuiCol.Text, text)
+        ImGui.PushStyleVar(G.ImGuiStyleVar.FrameRounding, 0)
+        local pressed = ImGui.Button(label, size)
+        ImGui.PopStyleColor(4)
+        ImGui.PopStyleVar(1)
+        return pressed
+    end
+
+    local function ColorsDiffer(a, b) return a.x ~= b.x or a.y ~= b.y or a.z ~= b.z or a.w ~= b.w end
+    local function V4(c) return ImVec4(c.x, c.y, c.z, c.w) end
+
+    local SE = { init = true, flash_color_time = 0.5, flash_color_idx = nil, flash_color_backup = nil, output_dest = 0,
+        output_only_modified = true, alpha_flags = CEF.AlphaPreviewHalf, cmap_output_dest = 0, edit = false, qual = true }
+
+    local function StyleEditorColors(style, ref)
+        local COUNT = ImPlot3D.ImPlot3DCol.COUNT
+        if ImGui.Button("Export") then
+            if SE.output_dest == 0 then ImGui.LogToClipboard() else ImGui.LogToTTY() end
+            ImGui.LogText("ImVec4* colors = ImPlot3D::GetStyle().Colors;\n")
+            for i = 0, COUNT - 1 do
+                local col, name = style.Colors[i], internal.GetStyleColorName(i)
+                if not SE.output_only_modified or ColorsDiffer(col, ref.Colors[i]) then
+                    ImGui.LogText("colors[ImPlot3DCol_%s]%s= ImVec4(%.2ff, %.2ff, %.2ff, %.2ff);\n", name, string.rep(" ", math.max(0, 15 - #name)),
+                        col.x, col.y, col.z, col.w)
+                end
+            end
+            ImGui.LogFinish()
+        end
+        ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+        SE.output_dest = ImGui.Combo("##output_type", SE.output_dest, "To Clipboard\0To TTY\0")
+        ImGui.SameLine()
+        _, SE.output_only_modified = ImGui.Checkbox("Only Modified Colors", SE.output_only_modified)
+        if SE.filter == nil then SE.filter = G.ImGuiTextFilter() end
+        ImGui.SetNextItemWidth(ImGui.GetFontSize() * 16)
+        SE.filter:Draw("Filter colors")
+        for _, e in { { "Opaque", CEF.AlphaOpaque }, { "Alpha", CEF.None }, { "Both", CEF.AlphaPreviewHalf } } do
+            if ImGui.RadioButtonEx(e[1], SE.alpha_flags == e[2]) then SE.alpha_flags = e[2] end
+            ImGui.SameLine()
+        end
+        HelpMarker("In the color list:\nLeft-click on color square to open color picker,\nRight-click to open edit options menu.")
+        ImGui.Separator()
+        for i = 0, COUNT - 1 do
+            local name = internal.GetStyleColorName(i)
+            if SE.filter:PassFilter(name) then
+                ImGui.PushID(i)
+                -- Flash color
+                if ImGui.Button("?") then
+                    if SE.flash_color_idx ~= nil then style.Colors[SE.flash_color_idx] = SE.flash_color_backup end
+                    SE.flash_color_time, SE.flash_color_idx, SE.flash_color_backup = 0.5, i, V4(style.Colors[i])
+                end
+                ImGui.SetItemTooltip("Flash given color to identify places where it is used.")
+                ImGui.SameLine()
+                -- Handle auto color selection
+                local is_auto = internal.IsColorAuto(style.Colors[i])
+                if is_auto then ImGui.BeginDisabled() end
+                if ImGui.Button("Auto") then style.Colors[i] = ImPlot3D.IMPLOT3D_AUTO_COL() end
+                if is_auto then ImGui.EndDisabled() end
+                -- Color selection
+                ImGui.SameLine()
+                if ImGui.ColorEdit4("##Color", style.Colors[i], bor(CEF.NoInputs, SE.alpha_flags)) then
+                    if style.Colors[i].w == -1 then style.Colors[i].w = 1 end
+                end
+                -- Save/Revert buttons if color changed
+                if ColorsDiffer(style.Colors[i], ref.Colors[i]) then
+                    ImGui.SameLine()
+                    if ImGui.Button("Save") then ref.Colors[i] = V4(style.Colors[i]) end
+                    ImGui.SameLine()
+                    if ImGui.Button("Revert") then style.Colors[i] = V4(ref.Colors[i]) end
+                end
+                ImGui.SameLine()
+                ImGui.TextUnformatted(name)
+                ImGui.PopID()
+            end
+        end
+    end
+
+    local function StyleEditorColormaps(gp)
+        if ImGui.Button("Export", ImVec2(75, 0)) then
+            if SE.cmap_output_dest == 0 then ImGui.LogToClipboard() else ImGui.LogToTTY() end
+            local size = ImPlot3D.GetColormapSize()
+            local name = ImPlot3D.GetColormapName(gp.Style.Colormap)
+            ImGui.LogText("static const ImU32 %s_Data[%d] = {\n", name, size)
+            for i = 0, size - 1 do
+                ImGui.LogText("    %u%s\n", internal.GetColormapColorU32(i, gp.Style.Colormap), if i == size - 1 then "" else ",")
+            end
+            ImGui.LogText("};\nImPlotColormap %s = ImPlot::AddColormap(\"%s\", %s_Data, %d);", name, name, name, size)
+            ImGui.LogFinish()
+        end
+        ImGui.SameLine(); ImGui.SetNextItemWidth(120)
+        SE.cmap_output_dest = ImGui.Combo("##output_type", SE.cmap_output_dest, "To Clipboard\0To TTY\0")
+        ImGui.SameLine()
+        _, SE.edit = ImGui.Checkbox("Edit Mode", SE.edit)
+        -- built-in/added
+        ImGui.Separator()
+        local cd = gp.ColormapData
+        for i = 0, cd.Count - 1 do
+            ImGui.PushID(i)
+            local size = cd:GetKeyCount(i)
+            local selected = i == gp.Style.Colormap
+            if not selected then ImGui.PushStyleVar(G.ImGuiStyleVar.Alpha, 0.25) end
+            if ImGui.Button(ImPlot3D.GetColormapName(i), ImVec2(100, 0)) then
+                gp.Style.Colormap = i
+                internal.BustItemCache()
+            end
+            if not selected then ImGui.PopStyleVar() end
+            ImGui.SameLine()
+            ImGui.BeginGroup()
+            if SE.edit then
+                for c = 0, size - 1 do
+                    ImGui.PushID(c)
+                    local col4 = ImGui.ColorConvertU32ToFloat4(cd:GetKeyColor(i, c))
+                    if ImGui.ColorEdit4("", col4, CEF.NoInputs) then
+                        cd:SetKeyColor(i, c, ImGui.ColorConvertFloat4ToU32(col4))
+                        internal.BustItemCache()
+                    end
+                    if (c + 1) % 12 ~= 0 and c ~= size - 1 then ImGui.SameLine() end
+                    ImGui.PopID()
+                end
+            elseif ImPlot3D.ColormapButton("##", ImVec2(-1, 0), i) then
+                SE.edit = true
+            end
+            ImGui.EndGroup()
+            ImGui.PopID()
+        end
+        if SE.custom == nil then
+            SE.custom = { ImVec4(1, 0, 0, 1), ImVec4(0, 1, 0, 1), ImVec4(0, 0, 1, 1) }
+            SE.name = ImGui.NewTextBuffer("MyColormap", 16)
+        end
+        local custom = SE.custom
+        ImGui.Separator()
+        ImGui.BeginGroup()
+        local half = (100 - ImGui.GetStyle().ItemSpacing.x) / 2
+        if ImGui.Button("+", ImVec2(half, 0)) then table.insert(custom, ImVec4(0, 0, 0, 1)) end
+        ImGui.SameLine()
+        if ImGui.Button("-", ImVec2(half, 0)) and #custom > 2 then table.remove(custom) end
+        ImGui.SetNextItemWidth(100)
+        ImGui.InputText("##Name", SE.name, 16, G.ImGuiInputTextFlags.CharsNoBlank)
+        _, SE.qual = ImGui.Checkbox("Qualitative", SE.qual)
+        local name = ImGui.TextBufferToString(SE.name)
+        if ImGui.Button("Add", ImVec2(100, 0)) and cd:GetIndex(name) == -1 then ImPlot3D.AddColormap(name, custom, #custom, SE.qual) end
+        ImGui.EndGroup()
+        ImGui.SameLine()
+        ImGui.BeginGroup()
+        for c = 1, #custom do
+            ImGui.PushID(c - 1)
+            ImGui.ColorEdit4("##Col1", custom[c], CEF.NoInputs)
+            if c % 12 ~= 0 then ImGui.SameLine() end
+            ImGui.PopID()
+        end
+        ImGui.EndGroup()
+    end
+
+    -- [Port] ImPlot3DStyle* ref -> optional style table (defaults to internal saved copy)
+    function ImPlot3D.ShowStyleEditor(ref)
+        local gp = ImPlot3D.GetCurrentContext()
+        -- Handle style internal storage
+        local style = ImPlot3D.GetStyle()
+        if SE.init and ref == nil then SE.ref_saved_style = CopyStyle({}, style) end
+        SE.init = false
+        ref = ref or SE.ref_saved_style
+        -- Handle flash style color
+        if SE.flash_color_idx ~= nil then
+            local color = style.Colors[SE.flash_color_idx]
+            color.x, color.y, color.z = ImGui.ColorConvertHSVtoRGB(math.cos(SE.flash_color_time * 6.0) * 0.5 + 0.5, 0.5, 0.5)
+            color.w = 1.0
+            -- Decrease timer until zero, then restore the backup color
+            SE.flash_color_time -= ImGui.GetIO().DeltaTime
+            if SE.flash_color_time <= 0.0 then
+                style.Colors[SE.flash_color_idx] = SE.flash_color_backup
+                SE.flash_color_idx, SE.flash_color_time = nil, 0.5
+            end
+        end
+        -- Style selector
+        if ImPlot3D.ShowStyleSelector("Colors##Selector") then CopyStyle(SE.ref_saved_style, style) end
+        -- Save/Revert button
+        if ImGui.Button("Save Ref") then
+            CopyStyle(ref, style)
+            CopyStyle(SE.ref_saved_style, style)
+        end
+        ImGui.SameLine()
+        if ImGui.Button("Revert Ref") then CopyStyle(style, ref) end
+        ImGui.SameLine()
+        HelpMarker("Save/Revert in local non-persistent storage. Default Colors definition are not affected. "
+            .. "Use \"Export\" below to save them somewhere.")
+        ImGui.Separator()
+        if ImGui.BeginTabBar("##Tabs", G.ImGuiTabBarFlags.None) then
+            if ImGui.BeginTabItem("Variables") then
+                ImGui.Text("Item Styling")
+                style.LineWeight = ImGui.SliderFloat("LineWeight", style.LineWeight, 0.0, 5.0, "%.1f")
+                style.MarkerSize = ImGui.SliderFloat("MarkerSize", style.MarkerSize, 2.0, 10.0, "%.1f")
+                style.FillAlpha = ImGui.SliderFloat("FillAlpha", style.FillAlpha, 0.0, 1.0, "%.2f")
+                ImGui.Text("Plot Styling")
+                ImGui.SliderFloat2("PlotDefaultSize", style.PlotDefaultSize, 0.0, 1000, "%.0f")
+                ImGui.SliderFloat2("PlotMinSize", style.PlotMinSize, 0.0, 300, "%.0f")
+                ImGui.SliderFloat2("PlotPadding", style.PlotPadding, 0.0, 20.0, "%.0f")
+                ImGui.SliderFloat2("LabelPadding", style.LabelPadding, 0.0, 20.0, "%.0f")
+                style.ViewScaleFactor = ImGui.SliderFloat("ViewScaleFactor", style.ViewScaleFactor, 0.1, 2.0, "%.2f")
+                ImGui.Text("Legend Styling")
+                ImGui.SliderFloat2("LegendPadding", style.LegendPadding, 0.0, 20.0, "%.0f")
+                ImGui.SliderFloat2("LegendInnerPadding", style.LegendInnerPadding, 0.0, 10.0, "%.0f")
+                ImGui.SliderFloat2("LegendSpacing", style.LegendSpacing, 0.0, 5.0, "%.0f")
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem("Colors") then
+                StyleEditorColors(style, ref)
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem("Colormaps") then
+                StyleEditorColormaps(gp)
+                ImGui.EndTabItem()
+            end
+            ImGui.EndTabBar()
+        end
+    end
+
+    S.ShowAboutWindow = { show_config_info = false }
+    -- [Port] bool* p_open -> returns the new open state
+    function ImPlot3D.ShowAboutWindow(p_open)
+        local s = S.ShowAboutWindow
+        local visible
+        p_open, visible = ImGui.Begin("About ImPlot3D", p_open, G.ImGuiWindowFlags.AlwaysAutoResize)
+        if not visible then
+            ImGui.End()
+            return p_open
+        end
+        ImGui.Text("ImPlot3D %s (%d)", ImPlot3D.IMPLOT3D_VERSION, ImPlot3D.IMPLOT3D_VERSION_NUM)
+        ImGui.TextLinkOpenURL("Homepage", "https://github.com/brenocq/implot3d")
+        ImGui.SameLine()
+        ImGui.TextLinkOpenURL("Q&A", "https://github.com/brenocq/implot3d/discussions/categories/q-a")
+        ImGui.SameLine()
+        ImGui.TextLinkOpenURL("Releases", "https://github.com/brenocq/implot3d/releases")
+        ImGui.SameLine()
+        ImGui.TextLinkOpenURL("Sponsors", "https://github.com/sponsors/brenocq")
+        ImGui.Separator()
+        ImGui.Text("(c) 2024-2025 Breno Cunha Queiroz")
+        ImGui.Text("Developed by Breno Cunha Queiroz and all ImPlot3D contributors.")
+        ImGui.Text("ImPlot3D is licensed under the MIT License.")
+        ImGui.Text("If your company uses ImPlot3D, please consider sponsoring the project.")
+        _, s.show_config_info = ImGui.Checkbox("Config/Build Information", s.show_config_info)
+        if s.show_config_info then
+            local copy_to_clipboard = ImGui.Button("Copy to clipboard")
+            ImGui.BeginChild(ImGui.GetID("cfg_infos"), ImVec2(0, ImGui.GetTextLineHeightWithSpacing() * 18), G.ImGuiChildFlags.FrameStyle)
+            if copy_to_clipboard then
+                ImGui.LogToClipboard()
+                ImGui.LogText("```\n")
+            end
+            ImGui.Text("ImPlot3D %s (%d)", ImPlot3D.IMPLOT3D_VERSION, ImPlot3D.IMPLOT3D_VERSION_NUM)
+            ImGui.Separator()
+            -- [Port] C++ sizeof/compiler defines -> Luau runtime info
+            ImGui.Text("Luau port (imgui-luau), _VERSION: %s", _VERSION)
+            if copy_to_clipboard then
+                ImGui.LogText("```\n")
+                ImGui.LogFinish()
+            end
+            ImGui.EndChild()
+        end
+        ImGui.End()
+        return p_open
+    end
+
+    return ImPlot3D.ShowDemoWindow
 end
