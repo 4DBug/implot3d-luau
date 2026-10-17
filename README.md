@@ -34,7 +34,7 @@ ImGui.End()
 ImPlot3D.ShowDemoWindow(true)
 ```
 
-Full LocalScript: `examples/roblox/main.client.luau` (rotating surface + demo windows).
+Full LocalScript: `examples/roblox/main.client.luau` (ImPlot3D demo window).
 
 ## API differences from C++
 
