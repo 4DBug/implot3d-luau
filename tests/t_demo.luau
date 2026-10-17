@@ -21,6 +21,12 @@ ImGui.TreeNode = function(label, ...)
     ImGui.SetNextItemOpen(true)
     return TreeNode(label, ...)
 end
+-- turn on every "Show ..." checkbox (metrics overlays, custom ticks/labels, about config info)
+local Checkbox = ImGui.Checkbox
+ImGui.Checkbox = function(label, v)
+    if string.sub(label, 1, 5) == "Show " or label == "Config/Build Information" then return false, true end
+    return Checkbox(label, v)
+end
 local tabs = { "Plots", "Axes", "Tools", "Custom", "Config", "Help" }
 local style_tabs = { "Variables", "Colors", "Colormaps" }
 local phase, seen = 1, {}
