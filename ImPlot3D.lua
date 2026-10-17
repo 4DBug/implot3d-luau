@@ -1584,7 +1584,7 @@ return function(G)
                 HeldEdgeIdx = -1, HeldPlaneIdx = -1, DragRotationAxis = P(0.0, 0.0, 0.0),
                 FitThisFrame = true,
                 Items = internal.ImPlot3DItemGroup(),
-                DrawList = nil, -- [Port] ImDrawList3D, added with rendering
+                DrawList = internal.ImDrawList3D(),
                 ContextClick = false, OpenContextThisFrame = false,
             }, Plot)
         end
@@ -2864,6 +2864,99 @@ return function(G)
     end
 
     --------------------------------------------------------------------------
+    -- [SECTION] ImDrawList3D
+    -- [Port] VtxBuffer is an ImDrawVtxBuffer (same 36-byte vertex layout as ImDrawList), IdxBuffer/ZBuffer are
+    -- 1-based Lua arrays sized by IdxSize/ZSize (never shrunk, so no per-frame allocation). Write ptrs are 1-based;
+    -- _VtxCurrentIdx is 0-based (local to this list) and offset by ImDrawList._VtxCurrentIdx on move.
+    -- [Port] SetTexture/ResetTexture (PlotImage) not ported yet: everything uses the draw list's current texture.
+    --------------------------------------------------------------------------
+    do
+        local DL3 = {}
+        DL3.__index = DL3
+        local MAX_IDX = 4294967295
+        internal.ImDrawList3D_MaxIdx = MAX_IDX
+
+        function internal.ImDrawList3D()
+            local self = setmetatable({
+                VtxBuffer = G.ImDrawVtxBuffer(), IdxBuffer = {}, ZBuffer = {}, IdxSize = 0, ZSize = 0,
+                _VtxCurrentIdx = 0, _VtxWritePtr = 1, _IdxWritePtr = 1, _ZWritePtr = 1,
+                _Flags = 0, _SharedData = nil, _Order = {},
+            }, DL3)
+            return self
+        end
+
+        function DL3:ResetBuffers()
+            self.VtxBuffer.Size = 0
+            self.IdxSize, self.ZSize = 0, 0
+            self._VtxCurrentIdx = 0
+            self._VtxWritePtr, self._IdxWritePtr, self._ZWritePtr = 1, 1, 1
+        end
+
+        function DL3:PrimReserve(idx_count, vtx_count)
+            IM_ASSERT(idx_count >= 0 and vtx_count >= 0 and idx_count % 3 == 0)
+            local vb = self.VtxBuffer
+            local old = vb.Size
+            vb:resize(old + vtx_count)
+            self._VtxWritePtr = old + 1
+            self._IdxWritePtr = self.IdxSize + 1
+            self.IdxSize += idx_count
+            self._ZWritePtr = self.ZSize + 1
+            self.ZSize += idx_count // 3
+        end
+
+        function DL3:PrimUnreserve(idx_count, vtx_count)
+            self.VtxBuffer.Size -= vtx_count
+            self.IdxSize -= idx_count
+            self.ZSize -= idx_count // 3
+        end
+
+        -- Move triangles to the current window draw list, sorted by depth
+        function DL3:SortedMoveToImGuiDrawList()
+            local draw_list = ImGui.GetWindowDrawList()
+            local tri_count = self.ZSize
+            if tri_count == 0 then
+                self:ResetBuffers()
+                return
+            end
+            -- Sort triangle indices by z (distance from viewer)
+            local order, Z = self._Order, self.ZBuffer
+            for i = 1, tri_count do order[i] = i end
+            for i = #order, tri_count + 1, -1 do order[i] = nil end
+            table.sort(order, function(a, b) return Z[a] < Z[b] end)
+
+            local vtx_count = self.VtxBuffer.Size
+            draw_list:PrimReserve(self.IdxSize, vtx_count)
+            -- Copy vertices (no reordering needed)
+            local stride = G.VTX_STRIDE or 36
+            buffer.copy(draw_list.VtxBuffer.Buf, (draw_list._VtxWritePtr - 1) * stride, self.VtxBuffer.Buf, 0, vtx_count * stride)
+            local idx_offset = draw_list._VtxCurrentIdx
+            draw_list._VtxWritePtr += vtx_count
+            draw_list._VtxCurrentIdx += vtx_count
+            local max_index_allowed = MAX_IDX - idx_offset
+            -- Copy indices with triangle sorting
+            local idx_in, idx_out, iw = self.IdxBuffer, draw_list.IdxBuffer.Data, draw_list._IdxWritePtr
+            local skipped = 0
+            for i = 1, tri_count do
+                local base = (order[i] - 1) * 3
+                local i0, i1, i2 = idx_in[base + 1], idx_in[base + 2], idx_in[base + 3]
+                if i0 > max_index_allowed or i1 > max_index_allowed or i2 > max_index_allowed then
+                    skipped += 3
+                else
+                    idx_out[iw] = i0 + idx_offset; idx_out[iw + 1] = i1 + idx_offset; idx_out[iw + 2] = i2 + idx_offset
+                    iw += 3
+                end
+            end
+            draw_list._IdxWritePtr = iw
+            if skipped > 0 then
+                -- [Port] upstream leaves the skipped indices reserved; give them back so ElemCount stays exact
+                draw_list.IdxBuffer:shrink(draw_list.IdxBuffer.Size - skipped)
+                draw_list.CmdBuffer.Data[draw_list.CmdBuffer.Size].ElemCount -= skipped
+            end
+            self:ResetBuffers()
+        end
+    end
+
+    --------------------------------------------------------------------------
     -- [SECTION] Begin/End Plot
     --------------------------------------------------------------------------
     do
@@ -2924,7 +3017,9 @@ return function(G)
             for i = 0, 2 do plot.Axes[i]:Reset() end
             -- Push frame rect clipping
             ImGui.PushClipRect(plot.FrameRect.Min, plot.FrameRect.Max, true)
-            -- [Port] TODO: plot.DrawList (ImDrawList3D) setup, added with items
+            -- Setup 3D draw list
+            plot.DrawList._Flags = window.DrawList.Flags
+            plot.DrawList._SharedData = ImGui.GetDrawListSharedData()
             return true
         end
 
@@ -2933,7 +3028,8 @@ return function(G)
             IM_ASSERT(gp ~= nil, "No current context. Did you call ImPlot3D::CreateContext() or ImPlot3D::SetCurrentContext()?")
             IM_ASSERT(gp.CurrentPlot ~= nil, "Mismatched BeginPlot()/EndPlot()!")
             local plot = gp.CurrentPlot
-            -- [Port] TODO: plot.DrawList:SortedMoveToImGuiDrawList() (ImDrawList3D, added with items)
+            -- Move triangles from 3D draw list to ImGui draw list
+            plot.DrawList:SortedMoveToImGuiDrawList()
             -- Handle data fitting
             if plot.FitThisFrame then
                 plot.FitThisFrame = false
