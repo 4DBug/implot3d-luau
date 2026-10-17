@@ -5,7 +5,7 @@ local ImPlot3D = require(RS:WaitForChild("ImPlot3D"))(G)
 local ImGui = G.ImGui
 
 ImGui.CreateContext()
-G.ImGui_ImplRoblox.Init(game:GetService("Players").LocalPlayer:WaitForChild("PlayerGui"))
+G.ImGui_ImplRoblox.Init()
 RunService.RenderStepped:Connect(function()
 	G.ImGui_ImplRoblox.NewFrame()
 	ImGui.NewFrame()
