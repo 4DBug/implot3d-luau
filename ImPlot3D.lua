@@ -3466,6 +3466,147 @@ return function(G)
     end
 
     --------------------------------------------------------------------------
+    -- [SECTION] Legend Utils
+    --------------------------------------------------------------------------
+    do
+        local ImHasFlag, IG = internal.ImHasFlag, internal.ItemGroup
+        local LF = ImPlot3D.ImPlot3DLegendFlags
+        local band, bnot, lshift = bit32.band, bit32.bnot, bit32.lshift
+        local ImRect = G.ImRect
+
+        local function ImAlphaU32(col, alpha) return band(col, bnot(lshift(math.floor((1 - alpha) * 255), 24))) end
+        internal.ImAlphaU32 = ImAlphaU32
+
+        function internal.CalcLegendSize(items, pad, spacing, vertical)
+            local n = IG.GetLegendCount(items)
+            local txt_ht = ImGui.GetTextLineHeight()
+            local icon_size = txt_ht
+            local max_w, sum_w = 0, 0
+            for i = 0, n - 1 do
+                local w = ImGui.CalcTextSize(IG.GetLegendLabel(items, i), nil, true).x
+                max_w = math.max(max_w, w)
+                sum_w += w
+            end
+            if vertical then
+                return ImVec2(pad.x * 2 + icon_size + max_w, pad.y * 2 + n * txt_ht + (n - 1) * spacing.y)
+            end
+            return ImVec2(pad.x * 2 + icon_size * n + sum_w + (n - 1) * spacing.x, pad.y * 2 + txt_ht)
+        end
+
+        -- [Port] modifies legend_rect in place, returns clamped
+        function internal.ClampLegendRect(r, outer, pad)
+            local clamped = false
+            local minx, miny, maxx, maxy = outer.Min.x + pad.x, outer.Min.y + pad.y, outer.Max.x - pad.x, outer.Max.y - pad.y
+            if r.Min.x < minx then r.Min.x = minx; clamped = true end
+            if r.Min.y < miny then r.Min.y = miny; clamped = true end
+            if r.Max.x > maxx then r.Max.x = maxx; clamped = true end
+            if r.Max.y > maxy then r.Max.y = maxy; clamped = true end
+            return clamped
+        end
+
+        function internal.ShowLegendEntries(items, legend_bb, pad, spacing, vertical, draw_list)
+            local txt_ht = ImGui.GetTextLineHeight()
+            local icon_size, icon_shrink = txt_ht, 2
+            local col_txt = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.LegendText)
+            local col_txt_dis = ImAlphaU32(col_txt, 0.25)
+            local sum_label_width = 0
+            local n = IG.GetLegendCount(items)
+            for i = 0, n - 1 do
+                local item = IG.GetLegendItem(items, i)
+                local label = IG.GetLegendLabel(items, i)
+                local label_width = ImGui.CalcTextSize(label, nil, true).x
+                local top_left = if vertical then legend_bb.Min + pad + ImVec2(0, i * (txt_ht + spacing.y))
+                    else legend_bb.Min + pad + ImVec2(i * (icon_size + spacing.x) + sum_label_width, 0)
+                sum_label_width += label_width
+                local icon_min = top_left + ImVec2(icon_shrink, icon_shrink)
+                local icon_max = top_left + ImVec2(icon_size - icon_shrink, icon_size - icon_shrink)
+                local label_max = top_left + ImVec2(label_width + icon_size, icon_size)
+                local col_item = ImAlphaU32(item.Color, 1)
+                local button_bb = ImRect(icon_min, label_max)
+                ImGui.KeepAliveID(item.ID)
+                local item_clk, item_hov, item_hld = false, false, false
+                if not ImHasFlag(items.Legend.Flags, LF.NoButtons) then
+                    item_clk, item_hov, item_hld = ImGui.ButtonBehavior(button_bb, item.ID)
+                end
+                if item_clk then item.Show = not item.Show end
+                local col_txt_hl
+                if item_hov and not ImHasFlag(items.Legend.Flags, LF.NoHighlightItem) then
+                    item.LegendHovered = true
+                    col_txt_hl = internal.ImMixU32(col_txt, col_item, 64)
+                else
+                    item.LegendHovered = false
+                    col_txt_hl = ImGui.GetColorU32(col_txt, nil, true)
+                end
+                local col_icon
+                if item_hld then
+                    col_icon = if item.Show then ImAlphaU32(col_item, 0.5) else ImGui.GetColorU32(G.ImGuiCol.TextDisabled, 0.5)
+                elseif item_hov then
+                    col_icon = if item.Show then ImAlphaU32(col_item, 0.75) else ImGui.GetColorU32(G.ImGuiCol.TextDisabled, 0.75)
+                else
+                    col_icon = if item.Show then col_item else col_txt_dis
+                end
+                draw_list:AddRectFilled(icon_min, icon_max, col_icon)
+                local text_end = ImGui.FindRenderedTextEnd(label)
+                if text_end > 1 then
+                    draw_list:AddText(top_left + ImVec2(icon_size, 0), if item.Show then col_txt_hl else col_txt_dis, label, text_end)
+                end
+            end
+        end
+
+        function internal.RenderLegend()
+            local gp = GImPlot3D
+            local plot = gp.CurrentPlot
+            if ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.NoLegend) or IG.GetLegendCount(plot.Items) == 0 then return end
+            local draw_list = ImGui.GetWindowDrawList()
+            local IO = ImGui.GetIO()
+            local style = gp.Style
+            local legend = plot.Items.Legend
+            local legend_horz = ImHasFlag(legend.Flags, LF.Horizontal)
+            local legend_size = internal.CalcLegendSize(plot.Items, style.LegendInnerPadding, style.LegendSpacing, not legend_horz)
+            local legend_pos = internal.GetLocationPos(plot.PlotRect, legend_size, legend.Location, style.LegendPadding)
+            legend.Rect = ImRect(legend_pos, legend_pos + legend_size)
+            legend.RectClamped = ImRect(legend.Rect.Min, legend.Rect.Max)
+            local legend_scrollable = internal.ClampLegendRect(legend.RectClamped, plot.PlotRect, style.LegendPadding)
+            -- Test hover (using the clamped rect so off-screen overflow does not register)
+            local BF = G.ImGuiButtonFlags
+            local flags = bit32.bor(BF.AllowOverlap, BF.PressedOnClick, BF.PressedOnDoubleClick, BF.MouseButtonLeft,
+                BF.MouseButtonRight, BF.MouseButtonMiddle, BF.FlattenChildren)
+            ImGui.KeepAliveID(plot.Items.ID)
+            local _
+            _, legend.Hovered, legend.Held = ImGui.ButtonBehavior(legend.RectClamped, plot.Items.ID, flags)
+            legend.Hovered = legend.Hovered or legend.RectClamped:Contains(IO.MousePos)
+            -- Handle legend scrolling
+            if legend_scrollable then
+                if legend.Hovered then
+                    ImGui.SetKeyOwner(G.ImGuiKey.MouseWheelY, plot.Items.ID)
+                    if IO.MouseWheel ~= 0.0 then
+                        local max_step = legend.Rect:GetSize() * 0.67
+                        local step = math.floor(math.min(2 * ImGui.GetFontSize(), max_step.x))
+                        legend.Scroll.x += step * IO.MouseWheel
+                        legend.Scroll.y += step * IO.MouseWheel
+                    end
+                end
+                local min_off = legend.RectClamped:GetSize() - legend.Rect:GetSize()
+                legend.Scroll.x = math.clamp(legend.Scroll.x, math.min(min_off.x, 0), 0)
+                legend.Scroll.y = math.clamp(legend.Scroll.y, math.min(min_off.y, 0), 0)
+                local scroll = if legend_horz then ImVec2(legend.Scroll.x, 0) else ImVec2(0, legend.Scroll.y)
+                local off = legend.RectClamped.Min - legend.Rect.Min + scroll
+                legend.Rect = ImRect(legend.Rect.Min + off, legend.Rect.Max + off)
+            else
+                legend.Scroll = ImVec2(0, 0)
+            end
+            -- Render background and entries (clipped to the clamped rect)
+            local col_bg = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.LegendBg)
+            local col_bd = ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.LegendBorder)
+            ImGui.PushClipRect(legend.RectClamped.Min, legend.RectClamped.Max, true)
+            draw_list:AddRectFilled(legend.RectClamped.Min, legend.RectClamped.Max, col_bg)
+            internal.ShowLegendEntries(plot.Items, legend.Rect, style.LegendInnerPadding, style.LegendSpacing, not legend_horz, draw_list)
+            draw_list:AddRect(legend.RectClamped.Min, legend.RectClamped.Max, col_bd)
+            ImGui.PopClipRect()
+        end
+    end
+
+    --------------------------------------------------------------------------
     -- [SECTION] ImDrawList3D
     -- [Port] VtxBuffer is an ImDrawVtxBuffer (same 36-byte vertex layout as ImDrawList), IdxBuffer/ZBuffer are
     -- 1-based Lua arrays sized by IdxSize/ZSize (never shrunk, so no per-frame allocation). Write ptrs are 1-based;
@@ -3665,7 +3806,8 @@ return function(G)
             ImGui.PopClipRect()
             -- Reset legend hover
             plot.Items.Legend.Hovered = false
-            -- [Port] TODO: RenderLegend (added with items)
+            -- Render legend
+            internal.RenderLegend()
             -- Mouse position text and context menus
             internal.ShowPlotPopups(plot)
             -- Pop frame rect clipping
