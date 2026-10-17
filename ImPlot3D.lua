@@ -1337,5 +1337,210 @@ return function(G)
         end
     end
 
+    --------------------------------------------------------------------------
+    -- [SECTION] ImPlot3DAxis
+    -- [Port] ImPlot3DTransform is `function(value, data) -> number`.
+    --------------------------------------------------------------------------
+    do
+        local ImPlot3DRange = ImPlot3D.ImPlot3DRange
+        local AxisFlags = ImPlot3D.ImPlot3DAxisFlags
+        local Cond = ImPlot3D.ImPlot3DCond
+        local ImHasFlag, ImNanOrInf = internal.ImHasFlag, internal.ImNanOrInf
+        local ImConstrainNan, ImConstrainInf = internal.ImConstrainNan, internal.ImConstrainInf
+        local HUGE_VAL = math.huge
+
+        local Axis = {}
+        Axis.__index = Axis
+
+        -- Holds axis information
+        function internal.ImPlot3DAxis()
+            return setmetatable({
+                Flags = AxisFlags.None, PreviousFlags = AxisFlags.None,
+                Range = ImPlot3DRange(0.0, 1.0), RangeCond = Cond.None,
+                NDCScale = 1.0, Scale = ImPlot3D.ImPlot3DScale.Linear,
+                Label = "", -- [Port] ImGuiTextBuffer -> string
+                Ticker = internal.ImPlot3DTicker(),
+                Formatter = nil, FormatterData = nil, Locator = nil, ShowDefaultTicks = true,
+                TransformForward = nil, TransformInverse = nil, TransformData = nil,
+                ScaledRange = ImPlot3DRange(),
+                FitThisFrame = true, FitExtents = ImPlot3DRange(HUGE_VAL, -HUGE_VAL),
+                ConstraintRange = ImPlot3DRange(-HUGE_VAL, HUGE_VAL),
+                ConstraintZoom = ImPlot3DRange(internal.DBL_MIN, HUGE_VAL),
+                Hovered = false, Held = false,
+                ColorBg = 0, ColorHov = 0, ColorAct = 0, -- IM_COL32_BLACK_TRANS
+            }, Axis)
+        end
+
+        function Axis:Reset()
+            self.RangeCond = Cond.None
+            self.Scale = ImPlot3D.ImPlot3DScale.Linear
+            self.TransformForward, self.TransformInverse, self.TransformData = nil, nil, nil
+            self.Ticker:Reset()
+            self.Formatter, self.FormatterData, self.Locator = nil, nil, nil
+            self.ShowDefaultTicks = true
+            self.FitExtents = ImPlot3DRange(HUGE_VAL, -HUGE_VAL)
+            self.ConstraintRange = ImPlot3DRange(-HUGE_VAL, HUGE_VAL)
+            self.ConstraintZoom = ImPlot3DRange(internal.DBL_MIN, HUGE_VAL)
+        end
+
+        function Axis:SetRange(v1, v2)
+            v1 = ImConstrainNan(ImConstrainInf(v1))
+            v2 = ImConstrainNan(ImConstrainInf(v2))
+            self.Range.Min = math.min(v1, v2)
+            self.Range.Max = math.max(v1, v2)
+            self:Constrain()
+            self:UpdateTransformCache()
+        end
+
+        function Axis:SetMin(_min, force)
+            if not force and self:IsLockedMin() then return false end
+            _min = ImConstrainNan(ImConstrainInf(_min))
+            -- Constraints
+            if _min < self.ConstraintRange.Min then _min = self.ConstraintRange.Min end
+            local zoom = self.Range.Max - _min
+            if zoom < self.ConstraintZoom.Min then _min = self.Range.Max - self.ConstraintZoom.Min end
+            if zoom > self.ConstraintZoom.Max then _min = self.Range.Max - self.ConstraintZoom.Max end
+            -- Ensure min is less than max
+            if _min >= self.Range.Max then return false end
+            self.Range.Min = _min
+            self:UpdateTransformCache()
+            return true
+        end
+
+        function Axis:SetMax(_max, force)
+            if not force and self:IsLockedMax() then return false end
+            _max = ImConstrainNan(ImConstrainInf(_max))
+            -- Constraints
+            if _max > self.ConstraintRange.Max then _max = self.ConstraintRange.Max end
+            local zoom = _max - self.Range.Min
+            if zoom < self.ConstraintZoom.Min then _max = self.Range.Min + self.ConstraintZoom.Min end
+            if zoom > self.ConstraintZoom.Max then _max = self.Range.Min + self.ConstraintZoom.Max end
+            -- Ensure max is greater than min
+            if _max <= self.Range.Min then return false end
+            self.Range.Max = _max
+            self:UpdateTransformCache()
+            return true
+        end
+
+        function Axis:Constrain()
+            local r, cr, cz = self.Range, self.ConstraintRange, self.ConstraintZoom
+            r.Min = ImConstrainNan(ImConstrainInf(r.Min))
+            r.Max = ImConstrainNan(ImConstrainInf(r.Max))
+            if r.Min < cr.Min then r.Min = cr.Min end
+            if r.Max > cr.Max then r.Max = cr.Max end
+            local zoom = r:Size()
+            if zoom < cz.Min then
+                local delta = (cz.Min - zoom) * 0.5
+                r.Min -= delta
+                r.Max += delta
+            end
+            if zoom > cz.Max then
+                local delta = (zoom - cz.Max) * 0.5
+                r.Min += delta
+                r.Max -= delta
+            end
+            if r.Max <= r.Min then r.Max = r.Min + internal.DBL_EPSILON end
+        end
+
+        function Axis:UpdateTransformCache()
+            if self.TransformForward ~= nil then
+                self.ScaledRange.Min = self.TransformForward(self.Range.Min, self.TransformData)
+                self.ScaledRange.Max = self.TransformForward(self.Range.Max, self.TransformData)
+            else
+                self.ScaledRange.Min = self.Range.Min
+                self.ScaledRange.Max = self.Range.Max
+            end
+        end
+
+        function Axis:PlotToNDC(plt)
+            if self.TransformForward ~= nil then
+                local s = self.TransformForward(plt, self.TransformData)
+                return (s - self.ScaledRange.Min) / (self.ScaledRange.Max - self.ScaledRange.Min)
+            end
+            return (plt - self.Range.Min) / (self.Range.Max - self.Range.Min)
+        end
+
+        function Axis:NDCToPlot(t)
+            if self.TransformInverse ~= nil then
+                local s = t * (self.ScaledRange.Max - self.ScaledRange.Min) + self.ScaledRange.Min
+                return self.TransformInverse(s, self.TransformData)
+            end
+            return self.Range.Min + t * (self.Range.Max - self.Range.Min)
+        end
+
+        function Axis:IsRangeLocked() return self.RangeCond == Cond.Always end
+        function Axis:IsLockedMin() return self:IsRangeLocked() or ImHasFlag(self.Flags, AxisFlags.LockMin) end
+        function Axis:IsLockedMax() return self:IsRangeLocked() or ImHasFlag(self.Flags, AxisFlags.LockMax) end
+        function Axis:IsLocked() return self:IsLockedMin() and self:IsLockedMax() end
+        function Axis:IsInputLockedMin() return self:IsLockedMin() or self:IsAutoFitting() end
+        function Axis:IsInputLockedMax() return self:IsLockedMax() or self:IsAutoFitting() end
+        function Axis:IsInputLocked() return self:IsLocked() or self:IsAutoFitting() end
+
+        function Axis:IsPanLocked(increasing)
+            if ImHasFlag(self.Flags, AxisFlags.PanStretch) then
+                return self:IsInputLocked()
+            end
+            if self:IsLockedMin() or self:IsLockedMax() or self:IsAutoFitting() then return false end
+            if increasing then return self.Range.Max == self.ConstraintRange.Max end
+            return self.Range.Min == self.ConstraintRange.Min
+        end
+
+        function Axis:SetLabel(label)
+            -- [Port] FindRenderedTextEnd: label text up to "##"
+            if label and (string.find(label, "##", 1, true) or #label + 1) > 1 then
+                self.Label = label
+            else
+                self.Label = ""
+            end
+        end
+        function Axis:GetLabel() return self.Label end
+
+        -- By default, the axis span from NDC -0.5 to 0.5, so size is 1.0 (scaled by NDCScale)
+        function Axis:NDCSize() return self.NDCScale end
+
+        function Axis:SetAspect(units_per_ndc_unit)
+            local new_size = units_per_ndc_unit * self:NDCSize()
+            local delta = (new_size - self.Range:Size()) * 0.5
+            local lmin, lmax = self:IsLockedMin(), self:IsLockedMax()
+            if lmin and lmax then
+                return
+            elseif lmin then
+                self:SetRange(self.Range.Min, self.Range.Max + 2 * delta)
+            elseif lmax then
+                self:SetRange(self.Range.Min - 2 * delta, self.Range.Max)
+            else
+                self:SetRange(self.Range.Min - delta, self.Range.Max + delta)
+            end
+        end
+        function Axis:GetAspect() return self.Range:Size() / self:NDCSize() end
+
+        function Axis:HasLabel() return self.Label ~= "" and not ImHasFlag(self.Flags, AxisFlags.NoLabel) end
+        function Axis:HasGridLines() return not ImHasFlag(self.Flags, AxisFlags.NoGridLines) end
+        function Axis:HasTickLabels() return not ImHasFlag(self.Flags, AxisFlags.NoTickLabels) end
+        function Axis:HasTickMarks() return not ImHasFlag(self.Flags, AxisFlags.NoTickMarks) end
+        function Axis:IsAutoFitting() return ImHasFlag(self.Flags, AxisFlags.AutoFit) end
+
+        function Axis:ExtendFit(value)
+            -- Only extend fit with values within the constraint range (log scale ignores <= 0)
+            if not ImNanOrInf(value) and value >= self.ConstraintRange.Min and value <= self.ConstraintRange.Max then
+                self.FitExtents.Min = math.min(self.FitExtents.Min, value)
+                self.FitExtents.Max = math.max(self.FitExtents.Max, value)
+            end
+        end
+
+        function Axis:ApplyFit()
+            if not self:IsLockedMin() and not ImNanOrInf(self.FitExtents.Min) then self.Range.Min = self.FitExtents.Min end
+            if not self:IsLockedMax() and not ImNanOrInf(self.FitExtents.Max) then self.Range.Max = self.FitExtents.Max end
+            if internal.ImAlmostEqual(self.Range.Min, self.Range.Max) then
+                self.Range.Max += 0.5
+                self.Range.Min -= 0.5
+            end
+            self:Constrain()
+            self:UpdateTransformCache()
+            self.FitExtents.Min = HUGE_VAL
+            self.FitExtents.Max = -HUGE_VAL
+        end
+    end
+
     return ImPlot3D
 end

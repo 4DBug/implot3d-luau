@@ -23,4 +23,20 @@ assert(t:TickCount() == 0)
 t:AddTick(1, true, true, "one")
 assert(t:GetText(0) == "one")
 
+-- Axis fit
+local ax = I.ImPlot3DAxis()
+ax:ExtendFit(-3); ax:ExtendFit(7); ax:ExtendFit(0 / 0); ax:ExtendFit(math.huge)
+ax:ApplyFit()
+assert(ax.Range.Min == -3 and ax.Range.Max == 7, "ApplyFit")
+assert(ax.FitExtents.Min == math.huge)
+ax:ExtendFit(2); ax:ApplyFit()
+assert(ax.Range.Min == 1.5 and ax.Range.Max == 2.5, "degenerate fit")
+ax.Flags = ImPlot3D.ImPlot3DAxisFlags.LockMin
+ax:ExtendFit(0); ax:ExtendFit(10); ax:ApplyFit()
+assert(ax.Range.Min == 1.5 and ax.Range.Max == 10, "locked min")
+assert(not ax:SetMin(0) and ax:SetMax(20) and ax.Range.Max == 20)
+ax:SetRange(5, -5)
+assert(ax.Range.Min == -5 and ax.Range.Max == 5)
+assert(near(ax:NDCToPlot(ax:PlotToNDC(3.3)), 3.3))
+
 print("OK")
