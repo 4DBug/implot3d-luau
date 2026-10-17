@@ -1872,5 +1872,202 @@ return function(G)
         end
     end
 
+    --------------------------------------------------------------------------
+    -- [SECTION] Text Utils
+    --------------------------------------------------------------------------
+    do
+        -- [Port] text_end dropped: Luau strings carry their length
+        function internal.AddTextRotated(draw_list, pos, angle, col, text)
+            local g = ImGui.GetCurrentContext()
+            local font_baked = ImGui.GetFontBaked()
+            local scale = g.FontSize / font_baked.Size
+            -- Align to be pixel perfect
+            pos = ImVec2(math.floor(pos.x), math.floor(pos.y))
+            -- Measure the size of the text in unrotated coordinates
+            local text_size = ImGui.CalcTextSize(text)
+            -- Precompute sine and cosine of the angle (note: angle should be positive for rotation in ImGui)
+            local cos_a, sin_a = math.cos(-angle), math.sin(-angle)
+            -- [Port] ponytail: per-glyph PrimReserve instead of reserve-all + PrimUnreserve
+            -- Adjust pen position to center the text
+            local pen_x, pen_y = -text_size.x * 0.5, -text_size.y * 0.5
+            do -- [Port] utf8.codes() raises on malformed UTF-8 (upstream breaks out of the loop)
+                for _, c in utf8.codes(text) do
+                    local glyph = font_baked:FindGlyph(c)
+                    if glyph ~= nil then
+                        -- Glyph quad corners in unrotated space, then rotate and translate
+                        local x0, y0 = pen_x + glyph.X0 * scale, pen_y + glyph.Y0 * scale
+                        local x1, y1 = pen_x + glyph.X1 * scale, pen_y + glyph.Y1 * scale
+                        local function R(x, y) return ImVec2(x * cos_a - y * sin_a + pos.x, x * sin_a + y * cos_a + pos.y) end
+                        draw_list:PrimReserve(6, 4)
+                        draw_list:PrimQuadUV(R(x0, y0), R(x1, y0), R(x1, y1), R(x0, y1),
+                            ImVec2(glyph.U0, glyph.V0), ImVec2(glyph.U1, glyph.V0), ImVec2(glyph.U1, glyph.V1), ImVec2(glyph.U0, glyph.V1), col)
+                        -- Advance the pen position
+                        pen_x += glyph.AdvanceX * scale
+                    end
+                end
+            end
+        end
+
+        function internal.AddTextCentered(draw_list, top_center, col, text)
+            local text_end = ImGui.FindRenderedTextEnd(text)
+            local text_size = ImGui.CalcTextSize(text, text_end, true)
+            draw_list:AddText(ImVec2(top_center.x - text_size.x * 0.5, top_center.y), col, text, text_end)
+        end
+    end
+
+    --------------------------------------------------------------------------
+    -- [SECTION] Plot Box Utils
+    -- [Port] lookup tables keep upstream's 0-based corner/edge/face indices; rows are 1-based Luau arrays
+    --------------------------------------------------------------------------
+    do
+        local P = ImPlot3D.ImPlot3DPoint
+        local ImHasFlag = internal.ImHasFlag
+
+        -- Faces of the box (defined by 4 corner indices)
+        local faces = {
+            [0] = { 0, 3, 7, 4 }, -- X-min face
+            { 0, 4, 5, 1 }, -- Y-min face
+            { 0, 1, 2, 3 }, -- Z-min face
+            { 1, 2, 6, 5 }, -- X-max face
+            { 3, 7, 6, 2 }, -- Y-max face
+            { 4, 5, 6, 7 }, -- Z-max face
+        }
+        -- Edges of the box (defined by 2 corner indices)
+        local edges = {
+            [0] = { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 }, -- Bottom face edges
+            { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 }, -- Top face edges
+            { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 }, -- Vertical edges
+        }
+        -- Face edges (4 edge indices for each face)
+        local face_edges = {
+            [0] = { 3, 11, 8, 7 }, -- X-min face
+            { 0, 8, 4, 9 }, -- Y-min face
+            { 0, 1, 2, 3 }, -- Z-min face
+            { 1, 9, 5, 10 }, -- X-max face
+            { 2, 10, 6, 11 }, -- Y-max face
+            { 4, 5, 6, 7 }, -- Z-max face
+        }
+        -- Lookup table for axis_corners based on active_faces (3D plot)
+        local axis_corners_lookup_3d = {
+            [0] = { [0] = { 3, 2 }, { 1, 2 }, { 1, 5 } }, -- {0, 0, 0}
+            { [0] = { 7, 6 }, { 5, 6 }, { 1, 5 } }, -- {0, 0, 1}
+            { [0] = { 0, 1 }, { 1, 2 }, { 2, 6 } }, -- {0, 1, 0}
+            { [0] = { 4, 5 }, { 5, 6 }, { 2, 6 } }, -- {0, 1, 1}
+            { [0] = { 3, 2 }, { 0, 3 }, { 0, 4 } }, -- {1, 0, 0}
+            { [0] = { 7, 6 }, { 4, 7 }, { 0, 4 } }, -- {1, 0, 1}
+            { [0] = { 0, 1 }, { 0, 3 }, { 3, 7 } }, -- {1, 1, 0}
+            { [0] = { 4, 5 }, { 4, 7 }, { 3, 7 } }, -- {1, 1, 1}
+        }
+        internal.box_faces, internal.box_edges, internal.box_face_edges = faces, edges, face_edges
+
+        -- [Port] active_faces is a 0-based array of 0/1 ints (C++ bool used as index)
+        function internal.Active3DFacesToAxisLookupIndex(active_faces)
+            return active_faces[0] * 4 + active_faces[1] * 2 + active_faces[2]
+        end
+
+        function internal.ComputeEdgeOutwardDir(p0, p1, box_center)
+            local dir = p1 - p0
+            local len = math.sqrt(dir.x * dir.x + dir.y * dir.y)
+            if len < 0.001 then return ImVec2(0, 0) end
+            dir = ImVec2(dir.x / len, dir.y / len)
+            -- Perpendicular direction, pointing away from box center
+            local perp = ImVec2(-dir.y, dir.x)
+            local to_edge = (p0 + p1) * 0.5 - box_center
+            if perp.x * to_edge.x + perp.y * to_edge.y < 0 then perp = ImVec2(-perp.x, -perp.y) end
+            return perp
+        end
+
+        -- Compute active faces based on the rotation. Returns active_faces, plane_2d
+        -- If the plot is close to 2D, plane_2d is the plane index (0 -> YZ, 1 -> XZ, 2 -> XY), -1 otherwise
+        function internal.ComputeActiveFaces(rotation, axes)
+            local active_faces, plane_2d = {}, -1
+            local rot_face_n = { [0] = rotation * P(1, 0, 0), rotation * P(0, 1, 0), rotation * P(0, 0, 1) }
+            local num_deg = 0 -- Number of planes that are degenerate (seen as a line)
+            for i = 0, 2 do
+                local n = rot_face_n[i]
+                local active
+                if math.abs(n.z) < 0.025 then
+                    -- If aligned with the plane, choose the min face for bottom/left
+                    active = n.x + n.y < 0.0
+                    num_deg += 1
+                else
+                    local is_inverted = ImHasFlag(axes[i].Flags, ImPlot3D.ImPlot3DAxisFlags.Invert)
+                    active = if is_inverted then n.z > 0.0 else n.z < 0.0
+                    plane_2d = i -- Set this plane as possible 2d plane
+                end
+                active_faces[i] = if active then 1 else 0
+            end
+            -- Only return 2d plane if there are exactly 2 degenerate planes
+            if num_deg ~= 2 then plane_2d = -1 end
+            return active_faces, plane_2d
+        end
+
+        -- Box corners in plot space (0-based)
+        function internal.ComputeBoxCorners(range_min, range_max)
+            local a, b = range_min, range_max
+            return {
+                [0] = P(a.x, a.y, a.z), P(b.x, a.y, a.z), P(b.x, b.y, a.z), P(a.x, b.y, a.z),
+                P(a.x, a.y, b.z), P(b.x, a.y, b.z), P(b.x, b.y, b.z), P(a.x, b.y, b.z),
+            }
+        end
+
+        function internal.ComputeBoxCornersPix(plot, corners)
+            local corners_pix = {}
+            for i = 0, 7 do corners_pix[i] = internal.PlotToPixels(plot, corners[i]) end
+            return corners_pix
+        end
+
+        -- [Port] returns active_faces, corners_pix, corners, plane_2d, axis_corners (out-params in C++)
+        function internal.GetAxesParameters(plot)
+            local active_faces, plane_2d = internal.ComputeActiveFaces(plot.Rotation, plot.Axes)
+            local corners = internal.ComputeBoxCorners(plot:RangeMin(), plot:RangeMax())
+            local corners_pix = internal.ComputeBoxCornersPix(plot, corners)
+            local axis_corners = { [0] = { -1, -1 }, { -1, -1 }, { -1, -1 } } -- [Port] axis_corners[a][1|2]
+            if plane_2d ~= -1 then
+                local face = plane_2d + 3 * active_faces[plane_2d] -- Face of the 2D plot
+                local common_edges = { -1, -1 } -- Edges shared by the 3 faces
+                for i = 1, 4 do
+                    local edge = face_edges[face][i]
+                    for j = 0, 1 do
+                        local axis = (plane_2d + 1 + j) % 3
+                        if table.find(face_edges[axis + active_faces[axis] * 3], edge) then common_edges[j + 1] = edge end
+                    end
+                end
+                -- Get corners from 2 edges (origin is the corner in common)
+                local origin_corner, x_corner, y_corner = -1, -1, -1
+                local e0, e1 = edges[common_edges[1]], edges[common_edges[2]]
+                for i = 1, 2 do
+                    for j = 1, 2 do
+                        if e0[i] == e1[j] then origin_corner, x_corner, y_corner = e0[i], e0[3 - i], e1[3 - j] end
+                    end
+                end
+                -- Swap x and y if they are flipped
+                local x_vec = corners_pix[x_corner] - corners_pix[origin_corner]
+                local y_vec = corners_pix[y_corner] - corners_pix[origin_corner]
+                if y_vec.x > x_vec.x then x_corner, y_corner = y_corner, x_corner end
+                -- Check which 3d axis the 2d axis refers to
+                local origin_3d = corners[origin_corner]
+                local x_3d = (corners[x_corner] - origin_3d):Normalized()
+                local y_3d = (corners[y_corner] - origin_3d):Normalized()
+                local x_axis, x_inverted, y_axis, y_inverted = -1, false, -1, false
+                for i = 0, 1 do
+                    local axis_i = (plane_2d + 1 + i) % 3
+                    if y_axis ~= -1 or (math.abs(x_3d[axis_i]) > 1e-8 and x_axis == -1) then
+                        x_axis, x_inverted = axis_i, x_3d[axis_i] < 0.0
+                    else
+                        y_axis, y_inverted = axis_i, y_3d[axis_i] < 0.0
+                    end
+                end
+                -- Set the 3d axis corners based on the 2d axis corners
+                axis_corners[x_axis] = if x_inverted then { x_corner, origin_corner } else { origin_corner, x_corner }
+                axis_corners[y_axis] = if y_inverted then { y_corner, origin_corner } else { origin_corner, y_corner }
+            else
+                local lookup = axis_corners_lookup_3d[internal.Active3DFacesToAxisLookupIndex(active_faces)]
+                for a = 0, 2 do axis_corners[a] = { lookup[a][1], lookup[a][2] } end
+            end
+            return active_faces, corners_pix, corners, plane_2d, axis_corners
+        end
+    end
+
     return ImPlot3D
 end
