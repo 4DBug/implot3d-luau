@@ -1024,5 +1024,226 @@ return function(G, ImPlot3D)
         end
     end
 
+    S.DemoCustomPerPointStyle = { marker_size = 4.0, cmap = Colormap.Viridis }
+    local torus_labels = { "Height-colored", "Radial-colored", "Angular-colored" }
+    local torus_legend_colors = { ImVec4(1, 0, 0, 1), ImVec4(0, 1, 0, 1), ImVec4(0, 0, 1, 1) }
+    function D.DemoCustomPerPointStyle()
+        IMGUI_DEMO_MARKER("Custom/Custom Per-Point Style")
+        local s = S.DemoCustomPerPointStyle
+        ImGui.BulletText("Demonstrates per-point coloring using colormap sampling.")
+        ImGui.BulletText("A different color is sampled for each point.")
+        ImGui.BulletText("All points share the same label for a single legend entry.")
+        s.marker_size = ImGui.SliderFloat("Marker Size", s.marker_size, 2.0, 10.0)
+        if ImGui.BeginCombo("Colormap", ImPlot3D.GetColormapName(s.cmap)) then
+            local cd = ImPlot3D.GetCurrentContext().ColormapData
+            for i = 0, ImPlot3D.GetColormapCount() - 1 do
+                -- Only show continuous colormaps
+                if not cd:IsQual(i) and ImGui.Selectable(ImPlot3D.GetColormapName(i), s.cmap == i) then s.cmap = i end
+            end
+            ImGui.EndCombo()
+        end
+        -- Generate three stacked toruses with different color patterns (x, y, z, t per point)
+        if s.tori == nil then
+            s.tori = {}
+            local R, r = 0.6, 0.2 -- Major / minor radius
+            for torus = 1, 3 do
+                local z_offset = (3 - torus) * 0.6
+                local d = { xs = {}, ys = {}, zs = {}, ts = {}, colors = {} }
+                for i = 0, 19 do
+                    local u = i / 20 * 2 * IM_PI
+                    for j = 0, 19 do
+                        local v = j / 20 * 2 * IM_PI
+                        local z = r * math.sin(v) + z_offset
+                        local t
+                        if torus == 1 then
+                            t = (z - (z_offset - r)) / (2 * r) -- Color by height
+                        elseif torus == 2 then
+                            t = (math.cos(v) + 1) / 2 -- Color by radial distance from tube center
+                        else
+                            t = (math.cos(u) + 1) / 2 -- Angular pattern around the major circle
+                        end
+                        table.insert(d.xs, (R + r * math.cos(v)) * math.cos(u))
+                        table.insert(d.ys, (R + r * math.cos(v)) * math.sin(u))
+                        table.insert(d.zs, z)
+                        table.insert(d.ts, t)
+                    end
+                end
+                s.tori[torus] = d
+            end
+        end
+        for _, d in s.tori do
+            for i = 1, 400 do d.colors[i] = ImGui.ColorConvertFloat4ToU32(ImPlot3D.SampleColormap(d.ts[i], s.cmap)) end
+        end
+        if ImPlot3D.BeginPlot("##PerPointStyle", ImVec2(-1, 0)) then
+            ImPlot3D.SetupAxes("X", "Y", "Z")
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -0.5, 1.5)
+            for torus = 1, 3 do
+                local d = s.tori[torus]
+                ImPlot3D.PlotScatter(torus_labels[torus], d.xs, d.ys, d.zs, 400,
+                    { Marker = Marker.Circle, MarkerSize = s.marker_size, MarkerFillColors = d.colors, MarkerLineColors = d.colors })
+                -- Override legend color with PlotDummy
+                local c = torus_legend_colors[torus]
+                ImPlot3D.PlotDummy(torus_labels[torus], { Marker = Marker.Circle, MarkerSize = s.marker_size, MarkerFillColor = c, MarkerLineColor = c })
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- [SECTION] Config
+    ---------------------------------------------------------------------------
+
+    S.DemoConfig = {}
+    function D.DemoConfig()
+        IMGUI_DEMO_MARKER("Config")
+        local s = S.DemoConfig
+        ImGui.ShowFontSelector("Font")
+        ImGui.ShowStyleSelector("ImGui Style")
+        ImPlot3D.ShowStyleSelector("ImPlot3D Style")
+        ImPlot3D.ShowColormapSelector("ImPlot3D Colormap")
+        ImGui.Separator()
+        -- Preview plot with 3D spirals
+        if ImPlot3D.BeginPlot("Preview", ImVec2(-1, 0)) then
+            if s.xs == nil then
+                s.xs, s.ys, s.zs = {}, {}, {}
+                for i = 1, 10 do
+                    s.xs[i], s.ys[i], s.zs[i] = {}, {}, {}
+                    for j = 1, 50 do
+                        local angle = (j - 1) / 49 * 4 * IM_PI
+                        local radius = 0.3 + (i - 1) * 0.05
+                        s.xs[i][j], s.ys[i][j], s.zs[i][j] = radius * math.cos(angle), radius * math.sin(angle), (i - 1) / 9
+                    end
+                end
+            end
+            for i = 1, 10 do
+                ImGui.PushID(i - 1)
+                ImPlot3D.PlotLine("##Spiral", s.xs[i], s.ys[i], s.zs[i], 50)
+                ImGui.PopID()
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- [SECTION] Demo Window
+    ---------------------------------------------------------------------------
+
+    local help_sections = {
+        { "Translation", { "Left-click drag to translate.", "If over axis, only that axis will translate.",
+            "If over plane, only that plane will translate.", "If outside plot area, translate in the view plane." } },
+        { "Zoom", { "Scroll or middle-click drag to zoom.", "If over axis, only that axis will zoom.",
+            "If over plane, only that plane will zoom.", "If outside plot area, zoom the entire plot." } },
+        { "Rotation", { "Right-click drag to rotate.", "To reset rotation, double right-click outside plot area.",
+            "To rotate to plane, double right-click when over the plane." } },
+        { "Fit data", { "Double left-click to fit.", "If over axis, fit data to axis.", "If over plane, fit data to plane.",
+            "If outside plot area, fit data to plot." } },
+        { "Context Menus", { "Right-click outside plot area to show full context menu.", "Right-click over legend to show legend context menu.",
+            "Right-click over axis to show axis context menu.", "Right-click over plane to show plane context menu." } },
+    }
+    function D.DemoHelp()
+        IMGUI_DEMO_MARKER("Help")
+        ImGui.SeparatorText("ABOUT THIS DEMO:")
+        ImGui.BulletText("The other tabs are demonstrating many aspects of the library.")
+        ImGui.SeparatorText("PROGRAMMER GUIDE:")
+        ImGui.BulletText("See the ShowDemoWindow() code in ImPlot3DDemo.lua. <- you are here!")
+        ImGui.BulletText("See comments in ImPlot3DDemo.lua.")
+        ImGui.BulletText("See example application in examples/ folder.")
+        ImGui.SeparatorText("USER GUIDE:")
+        for _, sec in help_sections do
+            ImGui.BulletText(sec[1])
+            ImGui.Indent()
+            for _, line in sec[2] do ImGui.BulletText(line) end
+            ImGui.Unindent()
+        end
+        ImGui.BulletText("Click legend label icons to show/hide plot items.")
+    end
+
+    local function DemoHeader(label, demo)
+        if ImGui.TreeNodeEx(label) then
+            demo()
+            ImGui.TreePop()
+        end
+    end
+
+    local demo_tabs = {
+        { "Plots", {
+            "Plot Types", { "Line Plots", D.DemoLinePlots }, { "Scatter Plots", D.DemoScatterPlots }, { "Triangle Plots", D.DemoTrianglePlots },
+            { "Quad Plots", D.DemoQuadPlots }, { "Surface Plots", D.DemoSurfacePlots }, { "Mesh Plots", D.DemoMeshPlots },
+            { "Realtime Plots", D.DemoRealtimePlots }, { "Image Plots", D.DemoImagePlots },
+            "Plot Options", { "Plot Flags", D.DemoPlotFlags }, { "Offset and Stride", D.DemoOffsetAndStride },
+            { "Legend Options", D.DemoLegendOptions }, { "Markers and Text", D.DemoMarkersAndText }, { "NaN Values", D.DemoNaNValues },
+            { "Per-Index Colors", D.Demo_PerIndexColors } } },
+        { "Axes", { { "Box Scale", D.DemoBoxScale }, { "Box Rotation", D.DemoBoxRotation }, { "Log Scale", D.Demo_LogScale },
+            { "Symmetric Log Scale", D.Demo_SymmetricLogScale }, { "Tick Labels", D.DemoTickLabels }, { "Axis Constraints", D.DemoAxisConstraints },
+            { "Equal Axes", D.DemoEqualAxes }, { "Auto-Fitting Data", D.DemoAutoFittingData } } },
+        { "Tools", { { "Mouse Picking", D.DemoMousePicking } } },
+        { "Custom", { { "Custom Styles", D.DemoCustomStyles }, { "Custom Rendering", D.DemoCustomRendering },
+            { "Custom Overlay", D.DemoCustomOverlay }, { "Custom Per-Point Style", D.DemoCustomPerPointStyle } } },
+        { "Config", D.DemoConfig },
+        { "Help", D.DemoHelp },
+    }
+
+    function ImPlot3D.ShowAllDemos()
+        ImGui.Text("ImPlot3D says olá! (%s) (%d)", ImPlot3D.IMPLOT3D_VERSION, ImPlot3D.IMPLOT3D_VERSION_NUM)
+        ImGui.Spacing()
+        if ImGui.BeginTabBar("ImPlot3DDemoTabs") then
+            for _, tab in demo_tabs do
+                if ImGui.BeginTabItem(tab[1]) then
+                    if type(tab[2]) == "function" then
+                        tab[2]()
+                    else
+                        for _, e in tab[2] do
+                            if type(e) == "string" then ImGui.SeparatorText(e) else DemoHeader(e[1], e[2]) end
+                        end
+                    end
+                    ImGui.EndTabItem()
+                end
+            end
+            ImGui.EndTabBar()
+        end
+    end
+
+    S.ShowDemoWindow = { show_implot3d_metrics = false, show_implot3d_style_editor = false, show_implot3d_about = false,
+        show_imgui_metrics = false, show_imgui_style_editor = false, show_imgui_demo = false }
+
+    -- [Port] p_open: true/false/nil (nil = no close button). Returns the new p_open value.
+    function ImPlot3D.ShowDemoWindow(p_open)
+        local s = S.ShowDemoWindow
+        if s.show_implot3d_metrics then s.show_implot3d_metrics = ImPlot3D.ShowMetricsWindow(s.show_implot3d_metrics) end
+        if s.show_implot3d_style_editor then
+            s.show_implot3d_style_editor = ImGui.Begin("Style Editor (ImPlot3D)", s.show_implot3d_style_editor)
+            ImPlot3D.ShowStyleEditor()
+            ImGui.End()
+        end
+        if s.show_implot3d_about then s.show_implot3d_about = ImPlot3D.ShowAboutWindow(s.show_implot3d_about) end
+        if s.show_imgui_style_editor then
+            s.show_imgui_style_editor = ImGui.Begin("Style Editor (ImGui)", s.show_imgui_style_editor)
+            ImGui.ShowStyleEditor()
+            ImGui.End()
+        end
+        if s.show_imgui_metrics then s.show_imgui_metrics = ImGui.ShowMetricsWindow(s.show_imgui_metrics) end
+        if s.show_imgui_demo then s.show_imgui_demo = ImGui.ShowDemoWindow(s.show_imgui_demo) end
+
+        ImGui.SetNextWindowPos(ImVec2(100, 100), G.ImGuiCond.FirstUseEver)
+        ImGui.SetNextWindowSize(ImVec2(600, 750), G.ImGuiCond.FirstUseEver)
+        p_open = ImGui.Begin("ImPlot3D Demo", p_open, G.ImGuiWindowFlags.MenuBar)
+        if ImGui.BeginMenuBar() then
+            if ImGui.BeginMenu("Tools") then
+                _, s.show_implot3d_metrics = ImGui.MenuItem("Metrics", nil, s.show_implot3d_metrics)
+                _, s.show_implot3d_style_editor = ImGui.MenuItem("Style Editor", nil, s.show_implot3d_style_editor)
+                _, s.show_implot3d_about = ImGui.MenuItem("About ImPlot3D", nil, s.show_implot3d_about)
+                ImGui.Separator()
+                _, s.show_imgui_metrics = ImGui.MenuItem("ImGui Metrics", nil, s.show_imgui_metrics)
+                _, s.show_imgui_style_editor = ImGui.MenuItem("ImGui Style Editor", nil, s.show_imgui_style_editor)
+                _, s.show_imgui_demo = ImGui.MenuItem("ImGui Demo", nil, s.show_imgui_demo)
+                ImGui.EndMenu()
+            end
+            ImGui.EndMenuBar()
+        end
+        ImPlot3D.ShowAllDemos()
+        ImGui.End()
+        return p_open
+    end
+
     -- @@TAIL@@
 end
