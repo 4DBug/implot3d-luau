@@ -424,5 +424,112 @@ return function(G, ImPlot3D)
         end
     end
 
+    local Location, LegendFlags = ImPlot3D.ImPlot3DLocation, ImPlot3D.ImPlot3DLegendFlags
+    S.DemoLegendOptions = { loc = Location.East, flags = 0, num_dummy_items = 25, t = 0,
+        xs1 = {}, ys1 = {}, zs1 = {}, xs2 = {}, ys2 = {}, zs2 = {}, xs3 = {}, ys3 = {}, zs3 = {} }
+    local legend_flag_list = {
+        { "Horizontal", "Legend entries will be displayed horizontally" },
+        { "NoButtons", "Legend icons will not function as hide/show buttons" },
+        { "NoHighlightItem", "Plot items will not be highlighted when their legend entry is hovered" },
+    }
+    function D.DemoLegendOptions()
+        IMGUI_DEMO_MARKER("Plots/Legend Options")
+        local s = S.DemoLegendOptions
+        for i, l in { "North", "South", "West", "East" } do
+            if i > 1 then ImGui.SameLine() end
+            _, s.loc = ImGui.CheckboxFlags(l, s.loc, Location[l])
+        end
+        for _, f in legend_flag_list do
+            s.flags = CHECKBOX_FLAG(s.flags, "ImPlot3DLegendFlags_" .. f[1], LegendFlags[f[1]])
+            ImGui.SameLine()
+            ImGui.TextDisabled("(?)")
+            if ImGui.IsItemHovered() then ImGui.SetTooltip(f[2]) end
+        end
+        local style = ImPlot3D.GetStyle()
+        ImGui.SliderFloat2("LegendPadding", style.LegendPadding, 0.0, 20.0, "%.0f")
+        ImGui.SliderFloat2("LegendInnerPadding", style.LegendInnerPadding, 0.0, 10.0, "%.0f")
+        ImGui.SliderFloat2("LegendSpacing", style.LegendSpacing, 0.0, 5.0, "%.0f")
+        s.num_dummy_items = ImGui.SliderInt("Num Dummy Items (Demo Scrolling)", s.num_dummy_items, 0, 100)
+        if ImPlot3D.BeginPlot("Legend Options Demo", ImVec2(-1, 0)) then
+            ImPlot3D.SetupAxes("X-Axis", "Y-Axis", "Z-Axis")
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -1, 1)
+            ImPlot3D.SetupLegend(s.loc, s.flags)
+            -- Generate some 3D line data
+            s.t += ImGui.GetIO().DeltaTime * 0.5
+            local count = 50
+            for i = 1, count do
+                local phase = (i - 1) * 0.1 + s.t
+                s.xs1[i], s.ys1[i], s.zs1[i] = 0.8 * math.cos(phase), 0.8 * math.sin(phase), 0.5 * math.sin(phase * 2)
+                s.xs2[i], s.ys2[i], s.zs2[i] = 0.6 * math.cos(phase + 1.0), 0.6 * math.sin(phase + 1.0), -0.3 * math.cos(phase * 1.5)
+                s.xs3[i], s.ys3[i], s.zs3[i] = 0.4 * math.sin(phase), 0.4 * math.cos(phase), 0.7 * math.cos(phase * 0.8)
+            end
+            ImPlot3D.PlotLine("Helix A", s.xs1, s.ys1, s.zs1, count)
+            ImPlot3D.PlotLine("Helix B##IDText", s.xs2, s.ys2, s.zs2, count) -- Text after ## used for ID only
+            ImPlot3D.PlotLine("##NotListed", s.xs3, s.ys3, s.zs3, count) -- Plotted, but not added to legend
+            -- Add dummy items to demonstrate legend scrolling (scroll the mouse wheel over the legend)
+            for i = 0, s.num_dummy_items - 1 do
+                ImPlot3D.PlotDummy(string.format("Item %03d", i))
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoMarkersAndText = {}
+    function D.DemoMarkersAndText()
+        IMGUI_DEMO_MARKER("Plots/Markers and Text")
+        local s = S.DemoMarkersAndText
+        if s.mk_size == nil then s.mk_size, s.mk_weight = ImPlot3D.GetStyle().MarkerSize, ImPlot3D.GetStyle().LineWeight end
+        s.mk_size = ImGui.DragFloat("Marker Size", s.mk_size, 0.1, 2.0, 10.0, "%.2f px")
+        s.mk_weight = ImGui.DragFloat("Marker Weight", s.mk_weight, 0.05, 0.5, 3.0, "%.2f px")
+        if ImPlot3D.BeginPlot("##MarkerStyles", ImVec2(-1, 0), Flags.CanvasOnly) then
+            local nd = AxisFlags.NoDecorations
+            ImPlot3D.SetupAxes(nil, nil, nil, nd, nd, nd)
+            local COUNT = Marker.COUNT
+            ImPlot3D.SetupAxesLimits(-0.5, 1.5, -0.5, 1.5, 0, COUNT + 1)
+            local xs, ys, zs = { 0, 0 }, { 0, 0 }, { COUNT, COUNT + 1 }
+            -- Filled markers
+            for m = 0, COUNT - 1 do
+                xs[2] = xs[1] + math.cos(zs[1] / COUNT * 2 * IM_PI) * 0.5
+                ys[2] = ys[1] + math.sin(zs[1] / COUNT * 2 * IM_PI) * 0.5
+                ImGui.PushID(m)
+                ImPlot3D.PlotLine("##Filled", xs, ys, zs, 2, { Marker = m, MarkerSize = s.mk_size, LineWeight = s.mk_weight })
+                ImGui.PopID()
+                zs[1] -= 1; zs[2] -= 1
+            end
+            xs[1], ys[1], zs[1] = 1, 1, COUNT
+            zs[2] = zs[1] + 1
+            -- Open markers
+            for m = 0, COUNT - 1 do
+                xs[2] = xs[1] + math.cos(zs[1] / COUNT * 2 * IM_PI) * 0.5
+                ys[2] = ys[1] - math.sin(zs[1] / COUNT * 2 * IM_PI) * 0.5
+                ImGui.PushID(m)
+                ImPlot3D.PlotLine("##Open", xs, ys, zs, 2, { Marker = m, MarkerSize = s.mk_size, LineWeight = s.mk_weight, FillColor = ImVec4(0, 0, 0, 0) })
+                ImGui.PopID()
+                zs[1] -= 1; zs[2] -= 1
+            end
+            ImPlot3D.PlotText("Filled Markers", 0.0, 0.0, 6.0)
+            ImPlot3D.PlotText("Open Markers", 1.0, 1.0, 6.0)
+            ImPlot3D.PushStyleColor(ImPlot3D.ImPlot3DCol.InlayText, ImVec4(1, 0, 1, 1))
+            ImPlot3D.PlotText("Rotated Text", 0.5, 0.5, 6.0, IM_PI / 4, ImVec2(0, 0))
+            ImPlot3D.PopStyleColor()
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoNaNValues = { include_nan = true, flags = 0 }
+    function D.DemoNaNValues()
+        IMGUI_DEMO_MARKER("Plots/NaN Values")
+        local s = S.DemoNaNValues
+        local data1, data2, data3 = { 0.0, 0.25, 0.5, 0.75, 1.0 }, { 0.0, 0.25, 0.5, 0.75, 1.0 }, { 0.0, 0.25, 0.5, 0.75, 1.0 }
+        if s.include_nan then data1[3] = 0 / 0 end
+        _, s.include_nan = ImGui.Checkbox("Include NaN", s.include_nan)
+        ImGui.SameLine()
+        _, s.flags = ImGui.CheckboxFlags("Skip NaN", s.flags, LineFlags.SkipNaN)
+        if ImPlot3D.BeginPlot("##NaNValues") then
+            ImPlot3D.PlotLine("Line", data1, data2, data3, 5, { Flags = s.flags, Marker = Marker.Square })
+            ImPlot3D.EndPlot()
+        end
+    end
+
     -- @@TAIL@@
 end
