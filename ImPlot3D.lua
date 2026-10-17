@@ -2177,6 +2177,131 @@ return function(G)
             end
         end
         internal.AXIS_TICK_INNER_PAD, internal.AXIS_LABEL_PAD = AXIS_TICK_INNER_PAD, AXIS_LABEL_PAD
+
+        function internal.RenderTickMarks(draw_list, plot, corners, corners_pix, axis_corners, plane_2d)
+            local col_tick = ImPlot3D.GetStyleColorU32(Col.AxisTick)
+            -- Tick lengths in NDC units
+            local major_size_ndc, minor_size_ndc = 0.06, 0.03
+            for a = 0, 2 do
+                local axis = plot.Axes[a]
+                local idx0, idx1 = axis_corners[a][1], axis_corners[a][2]
+                -- [Port] `continue` chain flattened into a repeat/break block
+                repeat
+                    if ImHasFlag(axis.Flags, AxisFlags.NoTickMarks) or idx0 == idx1 then break end -- axis not visible or invalid
+                    local axis_start = corners[idx0]
+                    local axis_dir = corners[idx1] - axis_start
+                    local axis_len = axis_dir:Length()
+                    if axis_len < 1e-12 then break end
+                    axis_dir = axis_dir / axis_len
+                    -- Draw axis line
+                    draw_list:AddLine(corners_pix[idx0], corners_pix[idx1], col_tick)
+                    -- Choose plane: 2D plane if any, else X/Y axis -> XY plane (2), Z axis -> XZ plane (1)
+                    local chosen_plane = if plane_2d ~= -1 then plane_2d elseif a == 2 then 1 else 2
+                    -- Project axis_dir onto chosen plane
+                    local proj_dir = P(axis_dir.x, axis_dir.y, axis_dir.z)
+                    proj_dir[chosen_plane] = 0.0
+                    local proj_len = proj_dir:Length()
+                    if proj_len < 1e-12 then break end -- Axis is parallel to plane normal, skip ticks
+                    proj_dir = proj_dir / proj_len
+                    -- Rotate 90 degrees in chosen plane
+                    local tick_dir
+                    if chosen_plane == 0 then
+                        tick_dir = P(0, -proj_dir.z, proj_dir.y) -- YZ plane
+                    elseif chosen_plane == 1 then
+                        tick_dir = P(-proj_dir.z, 0, proj_dir.x) -- XZ plane
+                    else
+                        tick_dir = P(-proj_dir.y, proj_dir.x, 0) -- XY plane
+                    end
+                    tick_dir:Normalize()
+                    for _, tick in axis.Ticker.Ticks do
+                        local v = (tick.PlotPos - axis.Range.Min) / (axis.Range.Max - axis.Range.Min)
+                        -- Skip ticks that are out of range
+                        if v >= 0.0 and v <= 1.0 then
+                            local tick_pos_ndc = internal.PlotToNDC(plot, axis_start + axis_dir * (v * axis_len))
+                            -- Half tick on each side of the axis line
+                            local half_tick_ndc = tick_dir * ((if tick.Major then major_size_ndc else minor_size_ndc) * 0.5)
+                            draw_list:AddLine(internal.NDCToPixels(plot, tick_pos_ndc - half_tick_ndc),
+                                internal.NDCToPixels(plot, tick_pos_ndc + half_tick_ndc), col_tick)
+                        end
+                    end
+                until true
+            end
+        end
+
+        -- Normalized screen-space direction of an axis edge
+        local function ScreenDir(p0, p1)
+            local d = p1 - p0
+            local len = math.sqrt(d.x * d.x + d.y * d.y)
+            return if len > 0.0 then ImVec2(d.x / len, d.y / len) else ImVec2(1.0, 0.0)
+        end
+
+        function internal.RenderTickLabels(draw_list, plot, corners, corners_pix, axis_corners)
+            local col_tick_txt = ImPlot3D.GetStyleColorU32(Col.AxisText)
+            local IM_PI = math.pi
+            for a = 0, 2 do
+                local axis = plot.Axes[a]
+                local idx0, idx1 = axis_corners[a][1], axis_corners[a][2]
+                -- If normal to the 2D plot, ignore the ticks
+                if not ImHasFlag(axis.Flags, AxisFlags.NoTickLabels) and idx0 ~= idx1 then
+                    local axis_start = corners[idx0]
+                    local axis_dir = corners[idx1] - axis_start
+                    local axis_start_pix, axis_end_pix = corners_pix[idx0], corners_pix[idx1]
+                    local axis_screen_dir = ScreenDir(axis_start_pix, axis_end_pix)
+                    -- Outward perpendicular direction and label offset
+                    local outward_dir = internal.ComputeEdgeOutwardDir(axis_start_pix, axis_end_pix, internal.PlotToPixels(plot, plot:RangeCenter()))
+                    local offset_pix = outward_dir * (internal.ComputeMaxTickLabelExtent(axis) + AXIS_TICK_INNER_PAD)
+                    -- Compute angle perpendicular to axis in screen space, normalized to [-pi, pi], kept upright
+                    local angle = math.atan2(-axis_screen_dir.y, axis_screen_dir.x) + IM_PI * 0.5
+                    if angle > IM_PI then angle -= 2 * IM_PI end
+                    if angle < -IM_PI then angle += 2 * IM_PI end
+                    if angle > IM_PI * 0.5 then angle -= IM_PI end
+                    if angle < -IM_PI * 0.5 then angle += IM_PI end
+                    for _, tick in axis.Ticker.Ticks do
+                        local t_axis = (tick.PlotPos - axis.Range.Min) / (axis.Range.Max - axis.Range.Min)
+                        if tick.ShowLabel and t_axis >= 0.0 and t_axis <= 1.0 then
+                            local tick_pos_pix = internal.PlotToPixels(plot, axis_start + axis_dir * t_axis)
+                            internal.AddTextRotated(draw_list, tick_pos_pix + offset_pix, angle, col_tick_txt, axis.Ticker:GetText(tick))
+                        end
+                    end
+                end
+            end
+        end
+
+        function internal.RenderAxisLabels(draw_list, plot, _, corners_pix, axis_corners)
+            local col_ax_txt = ImPlot3D.GetStyleColorU32(Col.AxisText)
+            local IM_PI = math.pi
+            for a = 0, 2 do
+                local axis = plot.Axes[a]
+                local idx0, idx1 = axis_corners[a][1], axis_corners[a][2]
+                -- If normal to the 2D plot, ignore axis label
+                if axis:HasLabel() and idx0 ~= idx1 then
+                    local axis_start_pix, axis_end_pix = corners_pix[idx0], corners_pix[idx1]
+                    local axis_screen_dir = ScreenDir(axis_start_pix, axis_end_pix)
+                    -- Tick labels are centered at (max_tick_extent + AXIS_TICK_INNER_PAD) from the axis edge,
+                    -- so the axis label sits one more max_tick_extent + AXIS_LABEL_PAD beyond that.
+                    local outward_dir = internal.ComputeEdgeOutwardDir(axis_start_pix, axis_end_pix, internal.PlotToPixels(plot, plot:RangeCenter()))
+                    local max_tick_extent = internal.ComputeMaxTickLabelExtent(axis)
+                    local total_offset = max_tick_extent + AXIS_TICK_INNER_PAD + max_tick_extent + AXIS_LABEL_PAD
+                    local label_pos_pix = (axis_start_pix + axis_end_pix) * 0.5 + outward_dir * total_offset
+                    -- Compute text angle
+                    local angle = math.atan2(-axis_screen_dir.y, axis_screen_dir.x)
+                    if angle > IM_PI * 0.5 then angle -= IM_PI end
+                    if angle < -IM_PI * 0.5 then angle += IM_PI end
+                    internal.AddTextRotated(draw_list, label_pos_pix, angle, col_ax_txt, axis:GetLabel())
+                end
+            end
+        end
+
+        function internal.RenderPlotBox(draw_list, plot)
+            local active_faces, corners_pix, corners, plane_2d, axis_corners = internal.GetAxesParameters(plot)
+            internal.RenderPlotBackground(draw_list, plot, corners_pix, active_faces, plane_2d, axis_corners)
+            internal.RenderAxisRects(draw_list, plot, corners_pix, active_faces, plane_2d, axis_corners)
+            internal.RenderPlotBorder(draw_list, plot, corners_pix, active_faces, plane_2d)
+            internal.RenderGrid(draw_list, plot, corners, active_faces, plane_2d)
+            internal.RenderTickMarks(draw_list, plot, corners, corners_pix, axis_corners, plane_2d)
+            internal.RenderTickLabels(draw_list, plot, corners, corners_pix, axis_corners)
+            internal.RenderAxisLabels(draw_list, plot, corners, corners_pix, axis_corners)
+        end
     end
 
     return ImPlot3D
