@@ -4332,6 +4332,343 @@ return function(G)
     end
 
     --------------------------------------------------------------------------
+    -- [SECTION] Colormap widgets, selectors, metrics (implot3d.cpp)
+    --------------------------------------------------------------------------
+    do
+        local ImGuiCol, ImGuiStyleVar, ImRect = G.ImGuiCol, G.ImGuiStyleVar, G.ImRect
+        local function B(v) return if v then "true" else "false" end
+
+        -- [Port] colors passed as (array, 0-based offset) as returned by ColormapData:GetKeys; bounds is an ImRect
+        function internal.RenderColorBar(colors, offset, size, DrawList, bounds, vert, reversed, continuous)
+            local n = if continuous then size - 1 else size
+            local function col(i) -- 0-based
+                return colors[offset + (if reversed then size - i - 1 else i) + 1]
+            end
+            local step = if vert then bounds:GetHeight() / n else bounds:GetWidth() / n
+            for i = 0, n - 1 do
+                local col1 = col(i)
+                local col2 = if continuous then col(i + 1) else col1
+                if vert then
+                    local y = bounds.Min.y + i * step
+                    DrawList:AddRectFilledMultiColor(ImVec2(bounds.Min.x, y), ImVec2(bounds.Max.x, y + step), col1, col1, col2, col2)
+                else
+                    local x = bounds.Min.x + i * step
+                    DrawList:AddRectFilledMultiColor(ImVec2(x, bounds.Min.y), ImVec2(x + step, bounds.Max.y), col1, col2, col2, col1)
+                end
+            end
+        end
+
+        local function ResolveCmap(gp, cmap)
+            cmap = if cmap == nil or cmap == ImPlot3D.IMPLOT3D_AUTO then gp.Style.Colormap else cmap
+            IM_ASSERT(cmap >= 0 and cmap < gp.ColormapData.Count, "Invalid colormap index!")
+            return cmap
+        end
+
+        -- [Port] float* t / ImVec4* out -> returns (t, changed); `out` (ImVec4) is filled in place when given
+        function ImPlot3D.ColormapSlider(label, t, out, format, cmap)
+            t = math.clamp(t, 0.0, 1.0)
+            local Window = ImGui.GetCurrentWindow()
+            if Window.SkipItems then return t, false end
+            local gp = GImPlot3D
+            cmap = ResolveCmap(gp, cmap)
+            local keys, off = gp.ColormapData:GetKeys(cmap)
+            local pos = Window.DC.CursorPos
+            local rect = ImRect(pos.x, pos.y, pos.x + ImGui.CalcItemWidth(), pos.y + ImGui.GetFrameHeight())
+            internal.RenderColorBar(keys, off, gp.ColormapData:GetKeyCount(cmap), ImGui.GetWindowDrawList(), rect, false, false,
+                not gp.ColormapData:IsQual(cmap))
+            local grab = internal.CalcTextColor(gp.ColormapData:LerpTable(cmap, t))
+            ImGui.PushStyleColor(ImGuiCol.FrameBg, G.IM_COL32_BLACK_TRANS)
+            ImGui.PushStyleColor(ImGuiCol.FrameBgActive, G.IM_COL32_BLACK_TRANS)
+            ImGui.PushStyleColor(ImGuiCol.FrameBgHovered, ImVec4(1, 1, 1, 0.1))
+            ImGui.PushStyleColor(ImGuiCol.SliderGrab, grab)
+            ImGui.PushStyleColor(ImGuiCol.SliderGrabActive, grab)
+            ImGui.PushStyleVar(ImGuiStyleVar.GrabMinSize, 2)
+            ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 0)
+            local changed
+            t, changed = ImGui.SliderFloat(label, t, 0, 1, format or "")
+            ImGui.PopStyleColor(5)
+            ImGui.PopStyleVar(2)
+            if out ~= nil then
+                local c = ImGui.ColorConvertU32ToFloat4(gp.ColormapData:LerpTable(cmap, t))
+                out.x, out.y, out.z, out.w = c.x, c.y, c.z, c.w
+            end
+            return t, changed
+        end
+        internal.ResolveColormap = ResolveCmap
+
+        local style_idx = -1
+        function ImPlot3D.ShowStyleSelector(label)
+            local changed
+            style_idx, changed = ImGui.Combo(label, style_idx, "Auto\0Classic\0Dark\0Light\0")
+            if changed then
+                if style_idx == 0 then ImPlot3D.StyleColorsAuto()
+                elseif style_idx == 1 then ImPlot3D.StyleColorsClassic()
+                elseif style_idx == 2 then ImPlot3D.StyleColorsDark()
+                elseif style_idx == 3 then ImPlot3D.StyleColorsLight() end
+                return true
+            end
+            return false
+        end
+
+        function ImPlot3D.ShowColormapSelector(label)
+            local gp = GImPlot3D
+            local set = false
+            if ImGui.BeginCombo(label, gp.ColormapData:GetName(gp.Style.Colormap)) then
+                for i = 0, gp.ColormapData.Count - 1 do
+                    if ImGui.Selectable(gp.ColormapData:GetName(i), gp.Style.Colormap == i) then
+                        gp.Style.Colormap = i
+                        internal.BustItemCache()
+                        set = true
+                    end
+                end
+                ImGui.EndCombo()
+            end
+            return set
+        end
+
+        local function ShowAxisMetrics(axis)
+            ImGui.BulletText("Label: %s", axis:GetLabel())
+            ImGui.BulletText("Flags: 0x%08X", axis.Flags)
+            ImGui.BulletText("Range: [%f,%f]", axis.Range.Min, axis.Range.Max)
+            ImGui.BulletText("NDC Scale: %f", axis.NDCScale)
+            ImGui.BulletText("NDC Range: [%f,%f]", -0.5 * axis.NDCScale, 0.5 * axis.NDCScale)
+            ImGui.BulletText("Aspect: %f", axis:GetAspect())
+            ImGui.BulletText("ShowDefaultTicks: %s", B(axis.ShowDefaultTicks))
+            ImGui.BulletText("FitThisFrame: %s", B(axis.FitThisFrame))
+            ImGui.BulletText("FitExtents: [%f,%f]", axis.FitExtents.Min, axis.FitExtents.Min) -- [sic] upstream prints Min twice
+            ImGui.BulletText("ConstraintRange: [%f,%f]", axis.ConstraintRange.Min, axis.ConstraintRange.Min)
+            ImGui.BulletText("ConstraintZoom: [%f,%f]", axis.ConstraintZoom.Min, axis.ConstraintZoom.Min)
+            ImGui.BulletText("Hovered: %s", B(axis.Hovered))
+            ImGui.BulletText("Held: %s", B(axis.Held))
+            if ImGui.TreeNode("Ticks") then
+                ImGui.BulletText("Size: %d", axis.Ticker:TickCount())
+                ImGui.TreePop()
+            end
+        end
+
+        local axis_labels = { [0] = "X-Axis", "Y-Axis", "Z-Axis" }
+        local plane_labels = { [0] = "YZ-Plane", "XZ-Plane", "XY-Plane" }
+        local axis_edges_lookup_3d = { [0] = { 2, 1, 9 }, { 6, 5, 9 }, { 0, 1, 10 }, { 4, 5, 10 }, { 2, 3, 8 }, { 6, 7, 8 }, { 0, 3, 11 }, { 4, 7, 11 } }
+        local M = { frame = false, canvas = false, plot = false, box = false, axis_line = false, corners = false, faces = false,
+            edges = false, legend = false, t = 0.5 }
+        local HIDDEN, ACTIVE, NOT_ACTIVE = 0, 1, 2 -- DisplayedType
+
+        -- [Port] "Plots" tree of ShowMetricsWindow, split out for size
+        function internal.ShowMetricsPlots(gp, n_plots, axis_labels, plane_labels, axis_edges_lookup_3d, ShowAxisMetrics, B)
+            if not ImGui.TreeNode("Plots", "Plots (%d)", n_plots) then return end
+            local IG = internal.ItemGroup
+            local _
+            for p = 0, n_plots - 1 do
+                local plot = gp.Plots:GetByIndex(p)
+                ImGui.PushID(p)
+                if ImGui.TreeNode("Plot", "Plot [0x%08X]", plot.ID) then
+                    local n_items = IG.GetItemCount(plot.Items)
+                    if ImGui.TreeNode("Items", "Items (%d)", n_items) then
+                        for i = 0, n_items - 1 do
+                            local item = IG.GetItemByIndex(plot.Items, i)
+                            ImGui.PushID(i)
+                            if ImGui.TreeNode("Item", "Item [0x%08X]", item.ID) then
+                                ImGui.Bullet()
+                                _, item.Show = ImGui.Checkbox("Show", item.Show)
+                                ImGui.Bullet()
+                                local temp = ImGui.ColorConvertU32ToFloat4(item.Color)
+                                if ImGui.ColorEdit4("Color", temp, G.ImGuiColorEditFlags.NoInputs) then item.Color = ImGui.ColorConvertFloat4ToU32(temp) end
+                                ImGui.BulletText("NameOffset: %d", item.NameOffset)
+                                ImGui.BulletText("Name: %s", if item.NameOffset ~= -1 then plot.Items.Legend.LabelList[item.NameOffset + 1] or "N/A" else "N/A")
+                                ImGui.BulletText("Hovered: %s", B(item.LegendHovered))
+                                ImGui.TreePop()
+                            end
+                            ImGui.PopID()
+                        end
+                        ImGui.TreePop()
+                    end
+                    if ImGui.TreeNode("Axes") then
+                        local active_faces, corners_pix, corners, plane_2d, axis_corners = internal.GetAxesParameters(plot)
+                        for a = 0, 2 do
+                            if not (plane_2d ~= -1 and plane_2d == a) and ImGui.TreeNode(axis_labels[a]) then
+                                ShowAxisMetrics(plot.Axes[a])
+                                ImGui.TreePop()
+                            end
+                        end
+                        if plane_2d ~= -1 then
+                            ImGui.BulletText("Plane2D: %d %s", plane_2d, plane_labels[plane_2d])
+                        else
+                            local idx = internal.Active3DFacesToAxisLookupIndex(active_faces)
+                            ImGui.BulletText("3D Active Faces: [%s,%s,%s]=%d", if active_faces[0] == 1 then "X-max" else "X-min",
+                                if active_faces[1] == 1 then "Y-max" else "Y-min", if active_faces[2] == 1 then "Z-max" else "Z-min", idx)
+                            local e = axis_edges_lookup_3d[idx]
+                            ImGui.BulletText("3D Active Edges Lookup: [%d,%d,%d]", e[1], e[2], e[3])
+                        end
+                        for a = 0, 2 do
+                            ImGui.BulletText("%s Label Corners: [%d,%d]", axis_labels[a], axis_corners[a][1], axis_corners[a][2])
+                        end
+                        for c = 0, 7 do
+                            ImGui.BulletText("Corner %d: [%.2f,%.2f,%.2f] [%.2f,%.2f]", c, corners[c].x, corners[c].y, corners[c].z,
+                                corners_pix[c].x, corners_pix[c].y)
+                        end
+                        ImGui.TreePop()
+                    end
+                    local L = plot.Items.Legend
+                    ImGui.BulletText("Title: %s", if plot:HasTitle() then plot:GetTitle() else "none")
+                    ImGui.BulletText("Flags: 0x%08X", plot.Flags)
+                    ImGui.BulletText("Initialized: %s", B(plot.Initialized))
+                    ImGui.BulletText("Hovered: %s", B(plot.Hovered))
+                    ImGui.BulletText("Held: %s", B(plot.Held))
+                    ImGui.BulletText("HeldEdgeIdx: %d", plot.HeldEdgeIdx)
+                    ImGui.BulletText("HeldPlaneIdx: %d", plot.HeldPlaneIdx)
+                    ImGui.BulletText("LegendLocation: %s", internal.GetShortLegendLocationName(L.Location) or "?")
+                    ImGui.BulletText("LegendHovered: %s", B(L.Hovered))
+                    ImGui.BulletText("LegendHeld: %s", B(L.Held))
+                    ImGui.BulletText("RotationCond: 0x%08X", plot.RotationCond)
+                    local q, r, ae = plot.InitialRotation, plot.Rotation, plot.RotationAnimationEnd
+                    ImGui.BulletText("InitialRotation: [%.2f,%.2f,%.2f,%.2f]", q.x, q.y, q.z, q.w)
+                    ImGui.BulletText("Rotation: [%.2f,%.2f,%.2f,%.2f]", r.x, r.y, r.z, r.w)
+                    ImGui.BulletText("Animation: Time=%.4f RotationEnd=[%.2f,%.2f,%.2f,%.2f]", plot.AnimationTime, ae.x, ae.y, r.z, ae.w)
+                    ImGui.BulletText("ViewScale: %.2f", plot:GetViewScale())
+                    ImGui.TreePop()
+                end
+                ImGui.PopID()
+            end
+            ImGui.TreePop()
+        end
+
+        -- [Port] bool* p_popen -> returns the new open state
+        function ImPlot3D.ShowMetricsWindow(p_open)
+            local fg = ImGui.GetForegroundDrawList()
+            local gp = GImPlot3D
+            local io = ImGui.GetIO()
+            local faces, edges, face_edges = internal.box_faces, internal.box_edges, internal.box_face_edges
+            local _
+            p_open = ImGui.Begin("Metrics (ImPlot3D)", p_open)
+            ImGui.Text("ImPlot3D " .. ImPlot3D.IMPLOT3D_VERSION)
+            ImGui.Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0 / io.Framerate, io.Framerate)
+            ImGui.Text("Mouse Position: [%.0f,%.0f]", io.MousePos.x, io.MousePos.y)
+            ImGui.Separator()
+            if ImGui.TreeNode("Tools") then
+                if ImGui.Button("Bust Plot Cache") then internal.BustPlotCache() end
+                ImGui.SameLine()
+                if ImGui.Button("Bust Item Cache") then internal.BustItemCache() end
+                for _, e in { { "frame", "Show Frame Rects" }, { "canvas", "Show Canvas Rects" }, { "plot", "Show Plot Rects" },
+                    { "box", "Show Plot Box" }, { "axis_line", "Show Axis Line" }, { "corners", "Show Axis Corner Indexes" },
+                    { "faces", "Show Axis Face Indexes" }, { "edges", "Show Axis Edge Indexes" }, { "legend", "Show Legend Rects" } } do
+                    _, M[e[1]] = ImGui.Checkbox(e[2], M[e[1]])
+                end
+                ImGui.TreePop()
+            end
+            local n_plots = gp.Plots.BufSize
+            -- Render rectangles
+            for p = 0, n_plots - 1 do
+                local plot = gp.Plots:GetByIndex(p)
+                if M.frame then fg:AddRect(plot.FrameRect.Min, plot.FrameRect.Max, IM_COL32(255, 0, 255, 255)) end
+                if M.canvas then fg:AddRect(plot.CanvasRect.Min, plot.CanvasRect.Max, IM_COL32(0, 255, 255, 255)) end
+                if M.plot then fg:AddRect(plot.PlotRect.Min, plot.PlotRect.Max, IM_COL32(255, 255, 0, 255)) end
+                local active_faces, corners_pix, plane_2d, axis_corners
+                if M.box or M.axis_line or M.corners or M.faces or M.edges then
+                    active_faces, corners_pix, _, plane_2d, axis_corners = internal.GetAxesParameters(plot)
+                end
+                if M.box or M.edges then
+                    local edge_types = {}
+                    for e = 0, 11 do edge_types[e] = if plane_2d == -1 and M.box then NOT_ACTIVE else HIDDEN end
+                    for a = 0, 2 do
+                        if plane_2d == -1 or a == plane_2d then
+                            for _, e in face_edges[a + 3 * active_faces[a]] do edge_types[e] = ACTIVE end
+                        end
+                    end
+                    for e = 0, 11 do
+                        local c0, c1 = corners_pix[edges[e][1]], corners_pix[edges[e][2]]
+                        if M.box then
+                            if edge_types[e] == ACTIVE then fg:AddLine(c0, c1, IM_COL32(255, 200, 0, 255))
+                            elseif edge_types[e] == NOT_ACTIVE then fg:AddLine(c0, c1, IM_COL32(100, 255, 0, 125)) end
+                        end
+                        if M.edges and edge_types[e] ~= HIDDEN then
+                            local mid = ImVec2((c0.x + c1.x) / 2, (c0.y + c1.y) / 2)
+                            local angle = math.atan2(-(c1.y - c0.y), c1.x - c0.x)
+                            -- Adjust angle to keep labels upright
+                            if angle > math.pi * 0.5 then angle -= math.pi end
+                            if angle < -math.pi * 0.5 then angle += math.pi end
+                            internal.AddTextRotated(fg, mid, angle, IM_COL32(200, 0, 0, 200), "E" .. e)
+                        end
+                    end
+                end
+                if M.axis_line then
+                    for a = 0, 2 do
+                        if plane_2d == -1 or a ~= plane_2d then
+                            fg:AddLine(corners_pix[axis_corners[a][1]], corners_pix[axis_corners[a][2]], IM_COL32(0, 255, 255, 255))
+                        end
+                    end
+                end
+                if M.corners then
+                    local corner_types = {}
+                    for c = 0, 7 do corner_types[c] = if plane_2d == -1 and M.box then NOT_ACTIVE else HIDDEN end
+                    for a = 0, 2 do
+                        if plane_2d == -1 or a == plane_2d then
+                            for _, c in faces[a + 3 * active_faces[a]] do corner_types[c] = ACTIVE end
+                        end
+                    end
+                    for c = 0, 7 do
+                        if corner_types[c] ~= HIDDEN then internal.AddTextRotated(fg, corners_pix[c], 0.0, IM_COL32(0, 200, 0, 200), "C" .. c) end
+                    end
+                end
+                if M.faces then
+                    for a = 0, 2 do
+                        for f = 0, 1 do
+                            if (plane_2d == -1 or a == plane_2d) and (f == active_faces[a] or M.box) then
+                                local face_idx = a + 3 * f
+                                local fi = faces[face_idx]
+                                local c0, c2 = corners_pix[fi[1]], corners_pix[fi[3]]
+                                internal.AddTextRotated(fg, ImVec2((c0.x + c2.x) / 2, (c0.y + c2.y) / 2), 0.0, IM_COL32(0, 200, 200, 200), "F" .. face_idx)
+                            end
+                        end
+                    end
+                end
+                local legend = plot.Items.Legend
+                if M.legend and internal.ItemGroup.GetLegendCount(plot.Items) > 0 then
+                    fg:AddRect(legend.Rect.Min, legend.Rect.Max, IM_COL32(255, 192, 0, 255))
+                    fg:AddRect(legend.RectClamped.Min, legend.RectClamped.Max, IM_COL32(255, 128, 0, 255))
+                end
+            end
+            internal.ShowMetricsPlots(gp, n_plots, axis_labels, plane_labels, axis_edges_lookup_3d, ShowAxisMetrics, B)
+            if ImGui.TreeNode("Colormaps") then
+                local cd = gp.ColormapData
+                ImGui.BulletText("Colormaps:  %d", cd.Count)
+                ImGui.BulletText("Memory: %d bytes", #cd.Tables * 4)
+                if ImGui.TreeNode("Data") then
+                    for m = 0, cd.Count - 1 do
+                        if ImGui.TreeNode(cd:GetName(m)) then
+                            local size = cd:GetTableSize(m)
+                            ImGui.BulletText("Qualitative: %s", B(cd:IsQual(m)))
+                            ImGui.BulletText("Key Count: %d", cd:GetKeyCount(m))
+                            ImGui.BulletText("Table Size: %d", size)
+                            ImGui.Indent()
+                            local samp = ImVec4(0, 0, 0, 0)
+                            ImGui.SetNextItemWidth(32 * 10 - ImGui.GetFrameHeight() - ImGui.GetStyle().ItemSpacing.x)
+                            M.t = ImPlot3D.ColormapSlider("##Sample", M.t, samp, "%.3f", m)
+                            ImGui.SameLine()
+                            ImGui.ColorButton("Sampler", samp)
+                            ImGui.PushStyleColor(ImGuiCol.FrameBg, ImVec4(0, 0, 0, 0))
+                            ImGui.PushStyleVar(ImGuiStyleVar.ItemSpacing, ImVec2(0, 0))
+                            for c = 0, size - 1 do
+                                ImGui.PushID(m * 1000 + c)
+                                ImGui.ColorButton("", ImGui.ColorConvertU32ToFloat4(cd:GetTableColor(m, c)), 0, ImVec2(10, 10))
+                                ImGui.PopID()
+                                if (c + 1) % 32 ~= 0 and c ~= size - 1 then ImGui.SameLine() end
+                            end
+                            ImGui.PopStyleVar()
+                            ImGui.PopStyleColor()
+                            ImGui.Unindent()
+                            ImGui.TreePop()
+                        end
+                    end
+                    ImGui.TreePop()
+                end
+                ImGui.TreePop()
+            end
+            ImGui.End()
+            return p_open
+        end
+    end
+
+    --------------------------------------------------------------------------
     -- [SECTION] Meshes (implot3d_meshes.cpp)
     -- [Port] ImPlot3D.Meshes.<Name> = { VtxXs, VtxYs, VtxZs, Idx, VtxCount, IdxCount }; Idx holds 0-based vertex
     -- indices (upstream semantics) for ImPlot3D.PlotMesh(label, m.VtxXs, m.VtxYs, m.VtxZs, m.Idx, m.VtxCount, m.IdxCount, spec).
