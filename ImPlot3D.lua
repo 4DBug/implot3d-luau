@@ -1028,14 +1028,13 @@ return function(G)
     -- [SECTION] Context / Context Utils
     --------------------------------------------------------------------------
     do
-        -- [Port] NextItemData added with the item milestone.
         function internal.ImPlot3DContext()
             return {
                 Plots = G.ImPool(function() return internal.ImPlot3DPlot() end), -- ImPool<ImPlot3DPlot>
                 CurrentPlot = nil,
                 CurrentItems = nil,
                 CurrentItem = nil,
-                NextItemData = nil,
+                NextItemData = internal.ImPlot3DNextItemData(),
                 Style = ImPlot3D.ImPlot3DStyle(),
                 ColorModifiers = {},
                 StyleModifiers = {},
@@ -1555,15 +1554,15 @@ return function(G)
             local loc = ImPlot3D.ImPlot3DLocation.NorthWest
             return {
                 Flags = 0, PreviousFlags = 0, Location = loc, PreviousLocation = loc,
-                Scroll = ImVec2(0, 0), Indices = {}, Labels = "",
+                Scroll = ImVec2(0, 0), Indices = {}, LabelList = {}, -- [Port] Labels text buffer -> LabelList
                 Rect = ImRect(), RectClamped = ImRect(), Hovered = false, Held = false,
             }
         end
 
         -- Holds items
-        -- [Port] item methods (GetItem, GetOrAddItem, ...) come with the item milestone
+        -- [Port] item methods live in internal.ItemGroup (GetItem, GetOrAddItem, ...)
         function internal.ImPlot3DItemGroup()
-            return { ID = 0, ItemPool = G.ImPool(), Legend = internal.ImPlot3DLegend(), ColormapIdx = 0, MarkerIdx = 0 }
+            return { ID = 0, ItemPool = G.ImPool(function() return internal.ImPlot3DItem() end), Legend = internal.ImPlot3DLegend(), ColormapIdx = 0, MarkerIdx = 0 }
         end
 
         local Plot = {}
@@ -2864,6 +2863,241 @@ return function(G)
     end
 
     --------------------------------------------------------------------------
+    -- [SECTION] ImPlot3DSpec, ImPlot3DItem, ImPlot3DItemGroup methods, ImPlot3DNextItemData, Item Utils
+    --------------------------------------------------------------------------
+    do
+        local Prop, Marker = ImPlot3D.ImPlot3DProp, ImPlot3D.ImPlot3DMarker
+        local ImHasFlag, IsColorAuto = internal.ImHasFlag, internal.IsColorAuto
+        local AUTO = ImPlot3D.IMPLOT3D_AUTO
+
+        -- [Port] Prop -> field name. Array props take Lua arrays (1-based) of ImU32/float.
+        local prop_fields = {
+            [Prop.LineColor] = "LineColor", [Prop.LineColors] = "LineColors", [Prop.LineWeight] = "LineWeight",
+            [Prop.FillColor] = "FillColor", [Prop.FillColors] = "FillColors", [Prop.FillAlpha] = "FillAlpha",
+            [Prop.Marker] = "Marker", [Prop.MarkerSize] = "MarkerSize", [Prop.MarkerSizes] = "MarkerSizes",
+            [Prop.MarkerLineColor] = "MarkerLineColor", [Prop.MarkerLineColors] = "MarkerLineColors",
+            [Prop.MarkerFillColor] = "MarkerFillColor", [Prop.MarkerFillColors] = "MarkerFillColors",
+            [Prop.Offset] = "Offset", [Prop.Stride] = "Stride", [Prop.Flags] = "Flags",
+        }
+        local color_fields = { LineColor = true, FillColor = true, MarkerLineColor = true, MarkerFillColor = true }
+
+        local SpecMT = {}
+        SpecMT.__index = SpecMT
+
+        -- Set properties from (ImPlot3DProp,value) pairs in any order
+        -- [Port] colors accept ImU32 or ImVec4 (the scalar/ImVec4 SetProp overloads)
+        function SpecMT:SetProp(...)
+            local n = select("#", ...)
+            IM_ASSERT(n % 2 == 0, "Odd number of arguments! You must provide (ImPlot3DProp,value) pairs!")
+            for i = 1, n, 2 do
+                local prop, v = select(i, ...)
+                local field = prop_fields[prop]
+                IM_ASSERT(field ~= nil, "User provided an invalid ImPlot3DProp!")
+                if color_fields[field] and type(v) == "number" then v = ImGui.ColorConvertU32ToFloat4(v) end
+                self[field] = v
+            end
+            return self
+        end
+
+        -- [Port] ImPlot3DSpec() / ImPlot3DSpec(prop, value, ...). A plain table of fields is also accepted by PlotX.
+        function ImPlot3D.ImPlot3DSpec(...)
+            local s = setmetatable({
+                LineColor = IMPLOT3D_AUTO_COL(), LineColors = nil, LineWeight = 1.0,
+                FillColor = IMPLOT3D_AUTO_COL(), FillColors = nil, FillAlpha = AUTO,
+                Marker = Marker.Auto, MarkerSize = AUTO, MarkerSizes = nil,
+                MarkerLineColor = IMPLOT3D_AUTO_COL(), MarkerLineColors = nil,
+                MarkerFillColor = IMPLOT3D_AUTO_COL(), MarkerFillColors = nil,
+                Offset = 0, Stride = AUTO, Flags = 0,
+            }, SpecMT)
+            if select("#", ...) > 0 then s:SetProp(...) end
+            return s
+        end
+
+        -- [Port] copy a user spec (ImPlot3DSpec or partial table) into a full spec; colors copied by value
+        local function CopySpec(dst, src)
+            local def = ImPlot3D.ImPlot3DSpec()
+            for k, v in def do
+                local sv = src and src[k]
+                if sv == nil then sv = v end
+                if color_fields[k] then
+                    if type(sv) == "number" then sv = ImGui.ColorConvertU32ToFloat4(sv) else sv = ImVec4(sv.x, sv.y, sv.z, sv.w) end
+                end
+                dst[k] = sv
+            end
+            for _, k in { "LineColors", "FillColors", "MarkerSizes", "MarkerLineColors", "MarkerFillColors" } do
+                dst[k] = src and src[k] or nil
+            end
+            return dst
+        end
+        internal.CopySpec = CopySpec
+
+        -- State information for plot items
+        function internal.ImPlot3DItem()
+            return { ID = 0, Color = G.IM_COL32_WHITE, Marker = Marker.None, NameOffset = -1, Show = true, LegendHovered = false, SeenThisFrame = false }
+        end
+
+        function internal.ImPlot3DNextItemData()
+            local n = { Spec = ImPlot3D.ImPlot3DSpec() }
+            internal.ResetNextItemData(n)
+            return n
+        end
+        function internal.ResetNextItemData(n)
+            CopySpec(n.Spec, nil)
+            n.RenderLine, n.RenderFill = false, false
+            n.RenderMarkerLine, n.RenderMarkerFill = true, true
+            n.IsAutoFill, n.IsAutoLine = true, true
+            n.Hidden = false
+        end
+
+        -- [Port] ImPlot3DItemGroup methods (group is the table from internal.ImPlot3DItemGroup)
+        -- [Port] Legend.Labels -> Legend.LabelList (1-based array of label strings); NameOffset = 0-based index into it
+        local IG = {}
+        internal.ItemGroup = IG
+        function IG.GetItemCount(g) return g.ItemPool.BufSize end
+        function IG.GetItemID(_, label_id) return ImGui.GetID(label_id) end
+        function IG.GetItem(g, id) if type(id) == "string" then id = ImGui.GetID(id) end return g.ItemPool:GetByKey(id) end
+        function IG.GetOrAddItem(g, id) return g.ItemPool:GetOrAddByKey(id) end
+        function IG.GetItemByIndex(g, i) return g.ItemPool:GetByIndex(i) end
+        function IG.GetItemIndex(g, item) return g.ItemPool:GetIndex(item) end
+        function IG.GetLegendCount(g) return #g.Legend.Indices end
+        function IG.GetLegendItem(g, i) return g.ItemPool:GetByIndex(g.Legend.Indices[i + 1]) end
+        function IG.GetLegendLabel(g, i) return g.Legend.LabelList[IG.GetLegendItem(g, i).NameOffset + 1] end
+        function IG.Reset(g)
+            g.ItemPool:Clear()
+            table.clear(g.Legend.Indices)
+            table.clear(g.Legend.LabelList)
+            g.ColormapIdx, g.MarkerIdx = 0, 0
+        end
+
+        function internal.NextMarker()
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentItems ~= nil, "NextMarker() needs to be called between BeginPlot() and EndPlot()!")
+            local idx = gp.CurrentItems.MarkerIdx % Marker.COUNT
+            gp.CurrentItems.MarkerIdx += 1
+            return idx
+        end
+
+        function internal.RegisterOrGetItem(label_id, flags)
+            local gp = GImPlot3D
+            local Items = gp.CurrentItems
+            local id = ImGui.GetID(label_id)
+            local just_created = Items.ItemPool:GetByKey(id) == nil
+            local item = Items.ItemPool:GetOrAddByKey(id)
+            -- Avoid re-adding the same item to the legend (the legend is reset every frame)
+            if item.SeenThisFrame then return item, just_created end
+            item.SeenThisFrame = true
+            -- Add item to the legend
+            local idx = Items.ItemPool:GetIndex(item)
+            item.ID = id
+            local display_end = string.find(label_id, "##", 1, true)
+            if not ImHasFlag(flags, ImPlot3D.ImPlot3DItemFlags.NoLegend) and display_end ~= 1 and label_id ~= "" then
+                local legend = Items.Legend
+                table.insert(legend.Indices, idx)
+                item.NameOffset = #legend.LabelList
+                table.insert(legend.LabelList, label_id)
+            end
+            return item, just_created
+        end
+
+        function internal.GetCurrentItem() return GImPlot3D.CurrentItem end
+        function internal.GetItemData() return GImPlot3D.NextItemData end
+
+        function internal.BustItemCache()
+            for _, plot in GImPlot3D.Plots.Buf do
+                if plot then IG.Reset(plot.Items) end
+            end
+        end
+
+        local ITEM_HIGHLIGHT_LINE_SCALE, ITEM_HIGHLIGHT_MARK_SCALE = 2.0, 1.25
+
+        function internal.EndItem()
+            local gp = GImPlot3D
+            internal.ResetNextItemData(gp.NextItemData)
+            gp.CurrentItem = nil
+        end
+
+        function internal.BeginItem(label_id, spec, item_col, item_mkr)
+            local gp = GImPlot3D
+            IM_ASSERT(gp.CurrentPlot ~= nil, "PlotX() needs to be called between BeginPlot() and EndPlot()!")
+            ImPlot3D.SetupLock()
+            local style = gp.Style
+            local n = gp.NextItemData
+            local s = CopySpec(n.Spec, spec)
+            -- Register item
+            local item, just_created = internal.RegisterOrGetItem(label_id, s.Flags)
+            gp.CurrentItem = item
+            -- Set/override item color
+            if item_col ~= nil and type(item_col) == "number" then item_col = ImGui.ColorConvertU32ToFloat4(item_col) end
+            if item_col ~= nil and not IsColorAuto(item_col) then
+                item.Color = ImGui.ColorConvertFloat4ToU32(item_col)
+            elseif just_created then
+                item.Color = internal.NextColormapColorU32()
+            end
+            -- Set/override item marker
+            item_mkr = item_mkr or Marker.Invalid
+            if item_mkr ~= Marker.Invalid then
+                if item_mkr ~= Marker.Auto then
+                    item.Marker = item_mkr
+                elseif just_created or item.Marker == Marker.None then
+                    item.Marker = internal.NextMarker()
+                end
+            end
+            -- Set next item color
+            local ic = ImGui.ColorConvertU32ToFloat4(item.Color)
+            n.IsAutoLine = IsColorAuto(s.LineColor)
+            n.IsAutoFill = IsColorAuto(s.FillColor)
+            if IsColorAuto(s.LineColor) then s.LineColor = ImVec4(ic.x, ic.y, ic.z, ic.w) end
+            if IsColorAuto(s.FillColor) then s.FillColor = ImVec4(ic.x, ic.y, ic.z, ic.w) end
+            if IsColorAuto(s.MarkerLineColor) then local c = s.LineColor s.MarkerLineColor = ImVec4(c.x, c.y, c.z, c.w) end
+            if IsColorAuto(s.MarkerFillColor) then local c = s.LineColor s.MarkerFillColor = ImVec4(c.x, c.y, c.z, c.w) end
+            -- Set size & weight
+            if s.LineWeight < 0 then s.LineWeight = style.LineWeight end
+            if s.Marker < 0 then s.Marker = style.Marker end
+            if s.MarkerSize < 0 then s.MarkerSize = style.MarkerSize end
+            if s.FillAlpha < 0 then s.FillAlpha = style.FillAlpha end
+            -- Apply alpha modifiers
+            s.FillColor.w *= s.FillAlpha
+            s.MarkerFillColor.w *= s.FillAlpha
+            -- Set render flags
+            n.RenderLine = s.LineColor.w > 0 and s.LineWeight > 0
+            n.RenderFill = s.FillColor.w > 0
+            n.RenderMarkerLine = s.LineColor.w > 0 and s.LineWeight > 0
+            n.RenderMarkerFill = s.FillColor.w > 0
+            -- Don't render if item is hidden
+            if not item.Show then
+                internal.EndItem()
+                return false
+            elseif item.LegendHovered and not ImHasFlag(gp.CurrentItems.Legend.Flags, ImPlot3D.ImPlot3DLegendFlags.NoHighlightItem) then
+                -- Legend hover highlight
+                s.LineWeight *= ITEM_HIGHLIGHT_LINE_SCALE
+                s.MarkerSize *= ITEM_HIGHLIGHT_MARK_SCALE
+            end
+            return true
+        end
+
+        -- [Port] getter: { Count, Get = function(g, idx) -> x, y, z } (see Getters section)
+        function internal.BeginItemEx(label_id, getter, spec, item_col, item_mkr)
+            if internal.BeginItem(label_id, spec, item_col, item_mkr) then
+                local plot = GImPlot3D.CurrentPlot
+                if plot.FitThisFrame and not ImHasFlag(GImPlot3D.NextItemData.Spec.Flags, ImPlot3D.ImPlot3DItemFlags.NoFit) then
+                    local a0, a1, a2 = plot.Axes[0], plot.Axes[1], plot.Axes[2]
+                    local f0, f1, f2 = a0.FitThisFrame, a1.FitThisFrame, a2.FitThisFrame
+                    local get = getter.Get
+                    for i = 0, getter.Count - 1 do
+                        -- [Port] plot.ExtendFit(getter(i)) inlined: no ImPlot3DPoint per point
+                        local x, y, z = get(getter, i)
+                        if f0 then a0:ExtendFit(x) end
+                        if f1 then a1:ExtendFit(y) end
+                        if f2 then a2:ExtendFit(z) end
+                    end
+                end
+                return true
+            end
+            return false
+        end
+    end
+
+    --------------------------------------------------------------------------
     -- [SECTION] ImDrawList3D
     -- [Port] VtxBuffer is an ImDrawVtxBuffer (same 36-byte vertex layout as ImDrawList), IdxBuffer/ZBuffer are
     -- 1-based Lua arrays sized by IdxSize/ZSize (never shrunk, so no per-frame allocation). Write ptrs are 1-based;
@@ -3012,7 +3246,7 @@ return function(G)
             -- Reset legend
             local legend = plot.Items.Legend
             table.clear(legend.Indices)
-            legend.Labels = ""
+            table.clear(legend.LabelList)
             -- Reset axes
             for i = 0, 2 do plot.Axes[i]:Reset() end
             -- Push frame rect clipping
