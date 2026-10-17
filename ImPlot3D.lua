@@ -3767,7 +3767,7 @@ return function(G)
     -- [Port] VtxBuffer is an ImDrawVtxBuffer (same 36-byte vertex layout as ImDrawList), IdxBuffer/ZBuffer are
     -- 1-based Lua arrays sized by IdxSize/ZSize (never shrunk, so no per-frame allocation). Write ptrs are 1-based;
     -- _VtxCurrentIdx is 0-based (local to this list) and offset by ImDrawList._VtxCurrentIdx on move.
-    -- [Port] SetTexture/ResetTexture (PlotImage) not ported yet: everything uses the draw list's current texture.
+    -- [Port] textures are ImTextureRef (as ImDrawList:AddImage takes); nil stands for upstream ImTextureID(0) (= window default).
     --------------------------------------------------------------------------
     do
         local DL3 = {}
@@ -3779,7 +3779,7 @@ return function(G)
             local self = setmetatable({
                 VtxBuffer = G.ImDrawVtxBuffer(), IdxBuffer = {}, ZBuffer = {}, IdxSize = 0, ZSize = 0,
                 _VtxCurrentIdx = 0, _VtxWritePtr = 1, _IdxWritePtr = 1, _ZWritePtr = 1,
-                _Flags = 0, _SharedData = nil, _Order = {},
+                _Flags = 0, _SharedData = nil, _Order = {}, _TextureBuffer = {},
             }, DL3)
             return self
         end
@@ -3789,7 +3789,33 @@ return function(G)
             self.IdxSize, self.ZSize = 0, 0
             self._VtxCurrentIdx = 0
             self._VtxWritePtr, self._IdxWritePtr, self._ZWritePtr = 1, 1, 1
+            table.clear(self._TextureBuffer)
+            self:ResetTexture()
         end
+
+        local function SameTex(a, b)
+            return a == b or (a ~= nil and b ~= nil and a._TexID == b._TexID and a._TexData == b._TexData)
+        end
+
+        -- [Port] _TextureBuffer items are { TexRef, VtxIdx }
+        function DL3:SetTexture(tex_ref)
+            local tb = self._TextureBuffer
+            local n = #tb
+            if n == 0 then
+                -- First texture assignment
+                tb[1] = { TexRef = tex_ref, VtxIdx = self._VtxCurrentIdx }
+                return
+            end
+            local prev = tb[n]
+            if prev.VtxIdx == self._VtxCurrentIdx then
+                -- Same vertex index: update existing texture; drop it if equal to the one before
+                prev.TexRef = tex_ref
+                if n >= 2 and SameTex(tb[n - 1].TexRef, tex_ref) then tb[n] = nil end
+            elseif not SameTex(prev.TexRef, tex_ref) then
+                tb[n + 1] = { TexRef = tex_ref, VtxIdx = self._VtxCurrentIdx }
+            end
+        end
+        function DL3:ResetTexture() self:SetTexture(nil) end
 
         function DL3:PrimReserve(idx_count, vtx_count)
             IM_ASSERT(idx_count >= 0 and vtx_count >= 0 and idx_count % 3 == 0)
@@ -3834,6 +3860,7 @@ return function(G)
             local max_index_allowed = MAX_IDX - idx_offset
             -- Copy indices with triangle sorting
             local idx_in, idx_out, iw = self.IdxBuffer, draw_list.IdxBuffer.Data, draw_list._IdxWritePtr
+            local idx_begin = iw
             local skipped = 0
             for i = 1, tri_count do
                 local base = (order[i] - 1) * 3
@@ -3850,6 +3877,42 @@ return function(G)
                 -- [Port] upstream leaves the skipped indices reserved; give them back so ElemCount stays exact
                 draw_list.IdxBuffer:shrink(draw_list.IdxBuffer.Size - skipped)
                 draw_list.CmdBuffer.Data[draw_list.CmdBuffer.Size].ElemCount -= skipped
+            end
+            -- If multiple textures were used (e.g. PlotImage was called), generate multiple ImDrawCmd
+            -- [Port] idx_out pointers -> 1-based positions in draw_list.IdxBuffer.Data
+            local tb = self._TextureBuffer
+            if #tb > 1 then
+                local header, cmds = draw_list._CmdHeader, draw_list.CmdBuffer
+                local default_tex = header.TexRef
+                local curr_tex = default_tex
+                cmds.Data[cmds.Size].ElemCount -= iw - idx_begin -- Remove elements reserved from PrimReserve
+                local last = idx_begin
+                for p = idx_begin, iw - 1, 3 do
+                    local vtx_idx = idx_out[p] - idx_offset
+                    local tri_tex = nil
+                    for j = 1, #tb do
+                        if vtx_idx >= tb[j].VtxIdx then tri_tex = tb[j].TexRef end
+                    end
+                    if tri_tex == nil then tri_tex = default_tex end
+                    if not SameTex(tri_tex, curr_tex) then
+                        cmds.Data[cmds.Size].ElemCount += p - last
+                        last = p
+                        curr_tex = tri_tex
+                        header.TexRef = curr_tex
+                        local cmd = G.ImDrawCmd()
+                        local cr = header.ClipRect
+                        cmd.ClipRect.x, cmd.ClipRect.y, cmd.ClipRect.z, cmd.ClipRect.w = cr.x, cr.y, cr.z, cr.w
+                        cmd.TexRef, cmd.VtxOffset, cmd.IdxOffset = curr_tex, header.VtxOffset, p - 1
+                        cmds:push_back(cmd)
+                    end
+                end
+                -- Flush last elements to cmd buffer
+                cmds.Data[cmds.Size].ElemCount += iw - last
+                if not SameTex(curr_tex, default_tex) then
+                    -- Restore default texture and flush last draw cmd with custom texture
+                    header.TexRef = default_tex
+                    draw_list:AddDrawCmd()
+                end
             end
             self:ResetBuffers()
         end
