@@ -1888,6 +1888,57 @@ return function(G)
             if type(x) == "number" then x = P(x, y, z) end
             return ImPlot3D.NDCToPixels(ImPlot3D.PlotToNDC(x))
         end
+
+        function ImPlot3D.PixelsToNDCRay(pix)
+            local plot = CurrentPlot("PixelsToNDCRay")
+            -- Undo screen transformations to get back to NDC space
+            local zoom, center = plot:GetViewScale(), plot.PlotRect:GetCenter()
+            local x = (pix.x - center.x) / zoom
+            local y = -(pix.y - center.y) / zoom -- Invert y-axis
+            local inv = plot.Rotation:Inverse()
+            local ndc_near, ndc_far = inv * P(x, y, 10.0), inv * P(x, y, -10.0)
+            return ImPlot3D.ImPlot3DRay(ndc_near, (ndc_far - ndc_near):Normalized())
+        end
+
+        function ImPlot3D.NDCRayToPlotRay(ray)
+            local plot = CurrentPlot("NDCRayToPlotRay")
+            local plot_origin = internal.NDCToPlot(plot, ray.Origin)
+            local plot_along = internal.NDCToPlot(plot, ray.Origin + ray.Direction)
+            return ImPlot3D.ImPlot3DRay(plot_origin, (plot_along - plot_origin):Normalized())
+        end
+
+        -- [Port] (pix) / (x, y) overloads
+        function ImPlot3D.PixelsToPlotRay(x, y)
+            if type(x) == "number" then x = ImVec2(x, y) end
+            return ImPlot3D.NDCRayToPlotRay(ImPlot3D.PixelsToNDCRay(x))
+        end
+
+        -- [Port] (pix, plane, mask) / (x, y, plane, mask) overloads
+        function ImPlot3D.PixelsToPlotPlane(pix, plane, mask, mask2)
+            if type(pix) == "number" then pix, plane, mask = ImVec2(pix, plane), mask, mask2 end
+            local plot = CurrentPlot("PixelsToPlotPlane")
+            local ray = ImPlot3D.PixelsToNDCRay(pix)
+            local O, D = ray.Origin, ray.Direction
+            local NAN = 0 / 0
+            -- Compute which plane to intersect with
+            local active_faces = internal.ComputeActiveFaces(plot.Rotation, plot.Axes)
+            local half = 0.5 * plot.Axes[plane].NDCScale
+            local coord = if active_faces[plane] == 1 then half else -half
+            -- Solve for t in O[plane] + D[plane]*t = coord
+            local denom = D[plane]
+            if math.abs(denom) < 1e-12 then return P(NAN, NAN, NAN) end -- Ray is parallel to the plane
+            local t = (coord - O[plane]) / denom
+            if t < 0.0 then return P(NAN, NAN, NAN) end -- Intersection behind the ray origin
+            local p = O + D * t
+            -- Handle mask (if the intersection is out of the plot box, return NAN)
+            if mask then
+                local box_scale = plot:GetBoxScale()
+                for i = 0, 2 do
+                    if i ~= plane and (p[i] < -0.5 * box_scale[i] or p[i] > 0.5 * box_scale[i]) then return P(NAN, NAN, NAN) end
+                end
+            end
+            return internal.NDCToPlot(plot, p)
+        end
     end
 
     --------------------------------------------------------------------------
@@ -2110,11 +2161,99 @@ return function(G)
             return math.max(w, AXIS_RECT_MIN_WIDTH)
         end
 
+        -- [Port] returns hovered plane (0 -> YZ, 1 -> XZ, 2 -> XY) or -1; plane_out dropped (always equal)
+        function internal.GetMouseOverPlane(active_faces, corners_pix)
+            local mouse_pos = ImGui.GetIO().MousePos
+            local contains = G.ImStd.ImTriangleContainsPoint
+            for a = 0, 2 do
+                local idx = faces[a + 3 * active_faces[a]]
+                local p0, p1, p2, p3 = corners_pix[idx[1]], corners_pix[idx[2]], corners_pix[idx[3]], corners_pix[idx[4]]
+                if contains(p0, p1, p2, mouse_pos) or contains(p2, p3, p0, mouse_pos) then return a end
+            end
+            return -1
+        end
+
+        -- Check if a point is inside an edge's hover region (a rectangle extending outward from the edge)
+        function internal.IsPointInEdgeHoverRegion(point, p0, p1, outward_dir, width)
+            local dir = p1 - p0
+            local len = math.sqrt(dir.x * dir.x + dir.y * dir.y)
+            if len < 0.001 then return false end
+            local local_ = point - p0
+            local along = (local_.x * dir.x + local_.y * dir.y) / len
+            local across = local_.x * outward_dir.x + local_.y * outward_dir.y
+            return along >= 0 and along <= len and across >= 0 and across <= width
+        end
+
+        -- [Port] returns hovered axis (or -1), hovered edge index (or -1)
+        function internal.GetMouseOverAxis(plot, corners_pix, plane_2d, axis_corners)
+            local mouse_pos = ImGui.GetIO().MousePos
+            local box_center = ImVec2(0, 0)
+            for i = 0, 7 do box_center = box_center + corners_pix[i] end
+            box_center = box_center * (1.0 / 8.0)
+            for axis_idx = 0, 2 do
+                local idx0, idx1 = axis_corners[axis_idx][1], axis_corners[axis_idx][2]
+                if not (plane_2d ~= -1 and axis_idx == plane_2d) and idx0 ~= -1 and idx1 ~= -1 then
+                    local edge = -1
+                    for e = 0, 11 do
+                        local ed = edges[e]
+                        if (ed[1] == idx0 and ed[2] == idx1) or (ed[1] == idx1 and ed[2] == idx0) then edge = e; break end
+                    end
+                    if edge ~= -1 then
+                        local p0, p1 = corners_pix[idx0], corners_pix[idx1]
+                        local outward_dir = internal.ComputeEdgeOutwardDir(p0, p1, box_center)
+                        if internal.IsPointInEdgeHoverRegion(mouse_pos, p0, p1, outward_dir, internal.ComputeAxisHoverWidth(plot.Axes[axis_idx])) then
+                            return axis_idx, edge
+                        end
+                    end
+                end
+            end
+            return -1, -1
+        end
+
+        function internal.GetLocationPos(outer_rect, inner_size, loc, pad)
+            local Loc = ImPlot3D.ImPlot3DLocation
+            local W, E = ImHasFlag(loc, Loc.West), ImHasFlag(loc, Loc.East)
+            local N, S = ImHasFlag(loc, Loc.North), ImHasFlag(loc, Loc.South)
+            local center = outer_rect:GetCenter()
+            local x = if W and not E then outer_rect.Min.x + pad.x
+                elseif E and not W then outer_rect.Max.x - pad.x - inner_size.x
+                else center.x - inner_size.x * 0.5
+            local y = if N and not S then outer_rect.Min.y + pad.y
+                elseif S and not N then outer_rect.Max.y - pad.y - inner_size.y
+                else center.y - inner_size.y * 0.5
+            return ImVec2(math.floor(x + 0.5), math.floor(y + 0.5))
+        end
+
+        function internal.RenderMousePos()
+            local plot = GImPlot3D.CurrentPlot
+            if ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.NoMouseText) then return end
+            local mouse_pos = ImGui.GetMousePos()
+            local pos = ImPlot3D.PixelsToPlotPlane(mouse_pos, 0, true)
+            if pos:IsNaN() then pos = ImPlot3D.PixelsToPlotPlane(mouse_pos, 1, true) end
+            if pos:IsNaN() then pos = ImPlot3D.PixelsToPlotPlane(mouse_pos, 2, true) end
+            if pos:IsNaN() then return end
+            local parts = {}
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                parts[i + 1] = axis.Formatter(pos[i], axis.FormatterData)
+            end
+            local text = "(" .. table.concat(parts, ", ") .. ")"
+            local p = internal.GetLocationPos(plot.PlotRect, ImGui.CalcTextSize(text), ImPlot3D.ImPlot3DLocation.SouthEast, ImVec2(10, 10))
+            ImGui.GetWindowDrawList():AddText(p, ImPlot3D.GetStyleColorU32(ImPlot3D.ImPlot3DCol.InlayText), text)
+        end
+
         function internal.RenderPlotBackground(draw_list, plot, corners_pix, active_faces, plane_2d, axis_corners)
             local col_bg = ImPlot3D.GetStyleColorVec4(Col.PlotBg)
             local col_bg_hov = col_bg + ImVec4(0.03, 0.03, 0.03, 0.0)
-            -- [Port] TODO: hover highlight needs GetMouseOverPlane/GetMouseOverAxis (input milestone); only the held plane is highlighted
-            local hovered_plane = if plot.Held then plot.HeldPlaneIdx else -1
+            local hovered_plane
+            if not plot.Held then
+                -- If the mouse is not held, highlight plane hovering when mouse over it
+                hovered_plane = internal.GetMouseOverPlane(active_faces, corners_pix)
+                if internal.GetMouseOverAxis(plot, corners_pix, plane_2d, axis_corners) ~= -1 then hovered_plane = -1 end
+            else
+                -- If the mouse is held, highlight the held plane
+                hovered_plane = plot.HeldPlaneIdx
+            end
             for a = 0, 2 do
                 local idx = faces[a + 3 * active_faces[a]]
                 local col = ImGui.ColorConvertFloat4ToU32(if hovered_plane == a then col_bg_hov else col_bg)
@@ -2123,7 +2262,7 @@ return function(G)
         end
 
         function internal.RenderAxisRects(draw_list, plot, corners_pix, _, plane_2d, axis_corners)
-            local hovered_axis = -1 -- [Port] TODO: GetMouseOverAxis (input milestone)
+            local hovered_axis = internal.GetMouseOverAxis(plot, corners_pix, plane_2d, axis_corners)
             -- Compute box center in screen space
             local box_center = ImVec2(0, 0)
             for i = 0, 7 do box_center = box_center + corners_pix[i] end
