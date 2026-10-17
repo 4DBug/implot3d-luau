@@ -1324,6 +1324,93 @@ return function(G)
             end
         end
 
+        -- Transforms (implot3d_internal.h)
+        local DBL_MIN, DBL_EPSILON = internal.DBL_MIN, internal.DBL_EPSILON
+        local function ImSign(v) return if v < 0 then -1 else 1 end
+        local function Trunc(v) return if v < 0 then math.ceil(v) else math.floor(v) end -- [Port] C (int) cast
+        function internal.TransformForward_Log10(v, _) return math.log10(if v <= 0.0 then DBL_MIN else v) end
+        function internal.TransformInverse_Log10(v, _) return 10 ^ v end
+        -- [Port] no math.asinh in Luau: sign-symmetric log form
+        function internal.TransformForward_SymLog(v, _)
+            local x = v / 2.0
+            local a = math.abs(x)
+            return 2.0 * ImSign(x) * math.log(a + math.sqrt(a * a + 1))
+        end
+        function internal.TransformInverse_SymLog(v, _) return 2.0 * math.sinh(v / 2.0) end
+
+        -- [Port] returns ok, exp_min, exp_max, exp_step instead of out-params
+        function internal.CalcLogarithmicExponents(range, pix)
+            if range.Min * range.Max > 0 then
+                local nMajor = math.max(2, IM_ROUND(pix * 0.01)) -- TODO: magic numbers
+                local log_min = math.log10(math.abs(range.Min))
+                local log_max = math.log10(math.abs(range.Max))
+                local log_a, log_b = math.min(log_min, log_max), math.max(log_min, log_max)
+                local exp_step = math.max(1, Trunc(Trunc(log_b - log_a) / nMajor))
+                local exp_min, exp_max = Trunc(log_a), Trunc(log_b)
+                if exp_step ~= 1 then
+                    while exp_step % 3 ~= 0 do exp_step += 1 end -- make step size multiple of three
+                    while math.fmod(exp_min, exp_step) ~= 0 do exp_min -= 1 end -- decrease exp_min until exp_min + N * exp_step will be 0
+                end
+                return true, exp_min, exp_max, exp_step
+            end
+            return false, 0, 0, 1
+        end
+
+        function internal.AddTicksLogarithmic(range, exp_min, exp_max, exp_step, ticker, formatter, data)
+            local sign = ImSign(range.Max)
+            local e = exp_min - exp_step
+            while e < exp_max + exp_step do
+                local major1 = sign * 10 ^ e
+                if major1 >= range.Min - DBL_EPSILON and major1 <= range.Max + DBL_EPSILON then
+                    ticker:AddTick(major1, true, true, formatter, data)
+                end
+                for j = 0, exp_step - 1 do
+                    major1 = sign * 10 ^ (e + j)
+                    local interval = (sign * 10 ^ (e + j + 1) - major1) / 9
+                    for i = 1, (if j < exp_step - 1 then 9 else 8) do
+                        local minor = major1 + i * interval
+                        if minor >= range.Min - DBL_EPSILON and minor <= range.Max + DBL_EPSILON then
+                            ticker:AddTick(minor, false, false, formatter, data)
+                        end
+                    end
+                end
+                e += exp_step
+            end
+        end
+
+        function internal.Locator_Log10(ticker, range, pixels, formatter, formatter_data)
+            local ok, exp_min, exp_max, exp_step = internal.CalcLogarithmicExponents(range, pixels)
+            if ok then internal.AddTicksLogarithmic(range, exp_min, exp_max, exp_step, ticker, formatter, formatter_data) end
+        end
+
+        local function CalcSymLogPixel(plt, range, pixels)
+            local f = internal.TransformForward_SymLog
+            local scaleToPixels = pixels / range:Size()
+            local scaleMin, scaleMax, s = f(range.Min), f(range.Max), f(plt)
+            local t = (s - scaleMin) / (scaleMax - scaleMin)
+            plt = range.Min + range:Size() * t
+            return 0 + scaleToPixels * (plt - range.Min)
+        end
+
+        function internal.Locator_SymLog(ticker, range, pixels, formatter, formatter_data)
+            if range.Min >= -1 and range.Max <= 1 then
+                internal.Locator_Default(ticker, range, pixels, formatter, formatter_data)
+            elseif range.Min * range.Max < 0 then -- cross zero
+                local pix_min, pix_max = 0, pixels
+                local pix_p1 = CalcSymLogPixel(1, range, pixels)
+                local pix_n1 = CalcSymLogPixel(-1, range, pixels)
+                local rp, rn = ImPlot3D.ImPlot3DRange(1, range.Max), ImPlot3D.ImPlot3DRange(range.Min, -1)
+                local _, exp_min_p, exp_max_p, exp_step_p = internal.CalcLogarithmicExponents(rp, math.abs(pix_max - pix_p1))
+                local _, exp_min_n, exp_max_n, exp_step_n = internal.CalcLogarithmicExponents(rn, math.abs(pix_n1 - pix_min))
+                local exp_step = math.max(exp_step_n, exp_step_p)
+                ticker:AddTick(0, true, true, formatter, formatter_data)
+                internal.AddTicksLogarithmic(rp, exp_min_p, exp_max_p, exp_step, ticker, formatter, formatter_data)
+                internal.AddTicksLogarithmic(rn, exp_min_n, exp_max_n, exp_step, ticker, formatter, formatter_data)
+            else
+                internal.Locator_Log10(ticker, range, pixels, formatter, formatter_data)
+            end
+        end
+
         -- [Port] values/labels are 1-based arrays
         function internal.AddTicksCustom(values, labels, n, ticker, formatter, data)
             for i = 1, n do
@@ -1703,6 +1790,41 @@ return function(G)
             local fmt = axis.Formatter or internal.Formatter_Default
             local data = (axis.Formatter and axis.FormatterData) or internal.IMPLOT3D_LABEL_FORMAT
             internal.AddTicksCustom(values, labels, n_ticks, axis.Ticker, fmt, data)
+        end
+
+        -- [Port] SetupAxisScale(idx, ImPlot3DScale) / (idx, forward, inverse, data) overloads
+        function ImPlot3D.SetupAxisScale(idx, scale, inverse, data)
+            local axis = CurrentPlotForSetup("SetupAxisScale").Axes[idx]
+            if type(scale) == "function" then
+                axis.Scale = ImPlot3D.IMPLOT3D_AUTO
+                axis.TransformForward, axis.TransformInverse, axis.TransformData = scale, inverse, data
+                return
+            end
+            local Scale = ImPlot3D.ImPlot3DScale
+            axis.Scale = scale
+            axis.TransformData = nil
+            if scale == Scale.Log10 then
+                axis.TransformForward, axis.TransformInverse = internal.TransformForward_Log10, internal.TransformInverse_Log10
+                axis.Locator = internal.Locator_Log10
+                axis.ConstraintRange = ImPlot3D.ImPlot3DRange(1.175494351e-38, math.huge) -- FLT_MIN
+            elseif scale == Scale.SymLog then
+                axis.TransformForward, axis.TransformInverse = internal.TransformForward_SymLog, internal.TransformInverse_SymLog
+                axis.Locator = internal.Locator_SymLog
+                axis.ConstraintRange = ImPlot3D.ImPlot3DRange(-math.huge, math.huge)
+            else
+                axis.TransformForward, axis.TransformInverse, axis.Locator = nil, nil, nil
+                axis.ConstraintRange = ImPlot3D.ImPlot3DRange(-math.huge, math.huge)
+            end
+        end
+
+        function ImPlot3D.SetupAxisLimitsConstraints(idx, v_min, v_max)
+            local axis = CurrentPlotForSetup("SetupAxisLimitsConstraints").Axes[idx]
+            axis.ConstraintRange.Min, axis.ConstraintRange.Max = v_min, v_max
+        end
+
+        function ImPlot3D.SetupAxisZoomConstraints(idx, zoom_min, zoom_max)
+            local axis = CurrentPlotForSetup("SetupAxisZoomConstraints").Axes[idx]
+            axis.ConstraintZoom.Min, axis.ConstraintZoom.Max = zoom_min, zoom_max
         end
 
         function ImPlot3D.SetupAxes(x_label, y_label, z_label, x_flags, y_flags, z_flags)

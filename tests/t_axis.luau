@@ -61,6 +61,17 @@ assert(plot.Axes[1].Ticker:TickCount() == 3)
 ImPlot3D.SetupBoxScale(1, 2, 1)
 ImPlot3D.SetupBoxRotation(30, 45)
 ImPlot3D.SetupBoxInitialRotation(10, 20)
+-- Log10 scale on a scratch axis: transforms, locator, constraints
+local I0 = ImPlot3D.internal
+assert(near(I0.TransformForward_Log10(100), 2) and near(I0.TransformInverse_SymLog(I0.TransformForward_SymLog(-7)), -7))
+local lt = I0.ImPlot3DTicker()
+I0.Locator_Log10(lt, ImPlot3D.ImPlot3DRange(1, 1000), 400, I0.Formatter_Default, "%g")
+assert(lt:TickCount() > 3 and lt.Ticks[1].PlotPos == 1, "log ticks")
+ImPlot3D.SetupAxisLimitsConstraints(0, -10, 10)
+ImPlot3D.SetupAxisZoomConstraints(0, 1, 20)
+assert(plot.Axes[0].ConstraintRange.Max == 10 and plot.Axes[0].ConstraintZoom.Max == 20)
+ImPlot3D.SetupAxisLimitsConstraints(0, -math.huge, math.huge)
+ImPlot3D.SetupAxisZoomConstraints(0, I0.DBL_MIN, math.huge)
 ImPlot3D.SetupLegend(ImPlot3D.ImPlot3DLocation.South)
 assert(plot.Items.Legend.Location == ImPlot3D.ImPlot3DLocation.South)
 plot.Axes[2].Flags = ImPlot3D.ImPlot3DAxisFlags.Invert
