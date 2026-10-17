@@ -3872,6 +3872,17 @@ return function(G)
         end
 
         -- PlotText(text, x, y, z, [angle], [pix_offset])
+        -- PlotDummy(label_id, [spec]): legend entry only
+        function ImPlot3D.PlotDummy(label_id, spec)
+            spec = internal.CopySpec({}, spec)
+            -- Pick the first non-auto color from the spec to override the legend icon color
+            local item_col = spec.LineColor
+            for _, k in { "FillColor", "MarkerLineColor", "MarkerFillColor" } do
+                if internal.IsColorAuto(item_col) then item_col = spec[k] end
+            end
+            if internal.BeginItem(label_id, spec, item_col, spec.Marker) then internal.EndItem() end
+        end
+
         function ImPlot3D.PlotText(text, x, y, z, angle, pix_offset)
             local gp = GImPlot3D
             IM_ASSERT(gp.CurrentPlot ~= nil, "PlotText() needs to be called between BeginPlot() and EndPlot()!")

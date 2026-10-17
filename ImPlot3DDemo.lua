@@ -286,5 +286,143 @@ return function(G, ImPlot3D)
         end
     end
 
+    -- [Port] ImPlot3DPoint/ImVec2 statics -> 1-based arrays for SliderFloat3/SliderFloat2; ImVec4 tints edited in place
+    S.DemoImagePlots = { tint1 = ImVec4(1, 1, 1, 1), tint2 = ImVec4(1, 1, 1, 1), center1 = { 0, 0, 1 }, axis_u1 = { 1, 0, 0 },
+        axis_v1 = { 0, 1, 0 }, uv0_1 = { 0, 0 }, uv1_1 = { 1, 1 }, p0 = { -1, -1, 0 }, p1 = { 1, -1, 0 }, p2 = { 1, 1, 0 },
+        p3 = { -1, 1, 0 }, uv0 = { 0, 0 }, uv1 = { 1, 0 }, uv2 = { 1, 1 }, uv3 = { 0, 1 } }
+    function D.DemoImagePlots()
+        IMGUI_DEMO_MARKER("Plots/Image Plots")
+        local s = S.DemoImagePlots
+        ImGui.BulletText("Below we are displaying the font texture, which is the only texture we have\naccess to in this demo.")
+        ImGui.BulletText("Use the 'ImTextureID' type as storage to pass pointers or identifiers to your\nown texture data.")
+        ImGui.BulletText("See ImGui Wiki page 'Image Loading and Displaying Examples'.")
+        ImGui.Dummy(ImVec2(0, 10))
+        if ImGui.TreeNodeEx("Image 1 Controls: Center + Axes") then
+            ImGui.SliderFloat3("Center", s.center1, -2, 2, "%.1f")
+            ImGui.SliderFloat3("Axis U", s.axis_u1, -2, 2, "%.1f")
+            ImGui.SliderFloat3("Axis V", s.axis_v1, -2, 2, "%.1f")
+            ImGui.SliderFloat2("UV0", s.uv0_1, 0, 1, "%.2f")
+            ImGui.SliderFloat2("UV1", s.uv1_1, 0, 1, "%.2f")
+            ImGui.ColorEdit4("Tint", s.tint1)
+            ImGui.TreePop()
+        end
+        if ImGui.TreeNodeEx("Image 2 Controls: Full Quad") then
+            ImGui.SliderFloat3("P0", s.p0, -2, 2, "%.1f")
+            ImGui.SliderFloat3("P1", s.p1, -2, 2, "%.1f")
+            ImGui.SliderFloat3("P2", s.p2, -2, 2, "%.1f")
+            ImGui.SliderFloat3("P3", s.p3, -2, 2, "%.1f")
+            ImGui.SliderFloat2("UV0", s.uv0, 0, 1, "%.2f")
+            ImGui.SliderFloat2("UV1", s.uv1, 0, 1, "%.2f")
+            ImGui.SliderFloat2("UV2", s.uv2, 0, 1, "%.2f")
+            ImGui.SliderFloat2("UV3", s.uv3, 0, 1, "%.2f")
+            ImGui.ColorEdit4("Tint##2", s.tint2)
+            ImGui.TreePop()
+        end
+        if ImPlot3D.BeginPlot("Image Plot", ImVec2(-1, 0), Flags.NoClip) then
+            -- We use the font atlas texture for this demo; your own loaded textures work just as well.
+            local tex = ImGui.GetIO().Fonts.TexRef
+            local function p3(a) return P(a[1], a[2], a[3]) end
+            local function v2(a) return ImVec2(a[1], a[2]) end
+            ImPlot3D.PlotImage("Image 1", tex, p3(s.center1), p3(s.axis_u1), p3(s.axis_v1), v2(s.uv0_1), v2(s.uv1_1), s.tint1)
+            ImPlot3D.PlotImage("Image 2", tex, p3(s.p0), p3(s.p1), p3(s.p2), p3(s.p3), v2(s.uv0), v2(s.uv1), v2(s.uv2), v2(s.uv3), s.tint2)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoRealtimePlots = { sdata1 = ScrollingBuffer(), sdata2 = ScrollingBuffer(), sdata3 = ScrollingBuffer(),
+        flags = AxisFlags.NoTickLabels, t = 0.0, last_t = -1.0 }
+    function D.DemoRealtimePlots()
+        IMGUI_DEMO_MARKER("Plots/Realtime Plots")
+        local s = S.DemoRealtimePlots
+        ImGui.BulletText("Move your mouse to change the data!")
+        if ImPlot3D.BeginPlot("Scrolling Plot") then
+            -- Pool mouse data every 10 ms
+            s.t += ImGui.GetIO().DeltaTime
+            if s.t - s.last_t > 0.01 then
+                s.last_t = s.t
+                local mouse = ImGui.GetMousePos()
+                if math.abs(mouse.x) < 1e4 and math.abs(mouse.y) < 1e4 then
+                    local pos, size = ImPlot3D.GetFramePos(), ImPlot3D.GetFrameSize()
+                    AddPoint(s.sdata1, s.t)
+                    AddPoint(s.sdata2, mouse.x - (pos.x + size.x / 2))
+                    AddPoint(s.sdata3, mouse.y - (pos.y + size.y / 2))
+                end
+            end
+            ImPlot3D.SetupAxes("Time", "Mouse X", "Mouse Y", s.flags, s.flags, s.flags)
+            ImPlot3D.SetupAxisLimits(ImAxis3D.X, s.t - 10.0, s.t, Cond.Always)
+            ImPlot3D.SetupAxisLimits(ImAxis3D.Y, -400, 400, Cond.Once)
+            ImPlot3D.SetupAxisLimits(ImAxis3D.Z, -400, 400, Cond.Once)
+            ImPlot3D.PlotLine("Mouse", s.sdata1.Data, s.sdata2.Data, s.sdata3.Data, #s.sdata1.Data, { Offset = s.sdata1.Offset })
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    local plot_flag_list = {
+        { "NoTitle", "Hide plot title" }, { "NoLegend", "Hide plot legend" },
+        { "NoMouseText", "Hide mouse position in plot coordinates" }, { "NoClip", "Disable 3D box clipping" },
+        { "NoMenus", "The user will not be able to open context menus" },
+        { "Equal", "X, Y, and Z axes will be constrained to have the same units/pixel" },
+        { "NoRotate", "Lock rotation interaction" }, { "NoPan", "Lock panning/translation interaction" },
+        { "NoZoom", "Lock zooming interaction" }, { "NoInputs", "Disable all user inputs" },
+    }
+    S.DemoPlotFlags = { flags = Flags.None, x = {}, y = {}, z = {} }
+    for i = 0, 99 do
+        local t = i * 0.1
+        S.DemoPlotFlags.x[i + 1], S.DemoPlotFlags.y[i + 1], S.DemoPlotFlags.z[i + 1] = 3.0 * math.cos(t), 3.0 * math.sin(t), t - 5.0
+    end
+    local corner_xs, corner_ys, corner_zs = { -10, 10, -10, 10, -10, 10, -10, 10 }, { -10, -10, 10, 10, -10, -10, 10, 10 }, { -5, -5, -5, -5, 5, 5, 5, 5 }
+    function D.DemoPlotFlags()
+        IMGUI_DEMO_MARKER("Plots/Plot Flags")
+        local s = S.DemoPlotFlags
+        -- [Port] the repeated CHECKBOX_FLAG + "(?)" tooltip blocks folded into a loop
+        for _, f in plot_flag_list do
+            s.flags = CHECKBOX_FLAG(s.flags, "ImPlot3DFlags_" .. f[1], Flags[f[1]])
+            ImGui.SameLine()
+            ImGui.TextDisabled("(?)")
+            if ImGui.IsItemHovered() then ImGui.SetTooltip(f[2]) end
+        end
+        if ImPlot3D.BeginPlot("Plot Flags Demo", ImVec2(-1, 0), s.flags) then
+            ImPlot3D.SetupAxes("X-axis", "Y-axis", "Z-axis")
+            ImPlot3D.SetupAxesLimits(-10, 10, -10, 10, -5, 5)
+            ImPlot3D.PlotLine("Helix", s.x, s.y, s.z, 100)
+            -- Add some scatter points to show equal scaling effect
+            ImPlot3D.PlotScatter("Cube corners", corner_xs, corner_ys, corner_zs, 8)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoOffsetAndStride = { offset = 0, data = {} }
+    function D.DemoOffsetAndStride()
+        IMGUI_DEMO_MARKER("Plots/Offset and Stride")
+        local s = S.DemoOffsetAndStride
+        local k_spirals, k_points_per = 11, 50
+        local data = s.data
+        for p = 0, k_points_per - 1 do
+            for sp = 0, k_spirals - 1 do
+                local r = sp / (k_spirals - 1) * 0.2 + 0.2
+                local theta = p / k_points_per * 6.28
+                local base = p * 3 * k_spirals + 3 * sp + 1
+                data[base], data[base + 1], data[base + 2] = 0.5 + r * math.cos(theta), 0.5 + r * math.sin(theta), 0.5 + 0.5 * math.sin(2.0 * theta)
+            end
+        end
+        ImGui.BulletText("Offsetting is useful for realtime plots (see above) and circular buffers.")
+        ImGui.BulletText("Striding is useful for interleaved data (e.g. audio) or plotting structs.")
+        ImGui.BulletText("Here, all spiral data is stored in a single interleaved buffer:")
+        ImGui.BulletText("[s0.x0 s0.y0 s0.z0 ... sn.x0 sn.y0 sn.z0 s0.x1 s0.y1 s0.z1 ... sn.x1 sn.y1 sn.z1 ... sn.xm sn.ym sn.zm]")
+        ImGui.BulletText("The offset value indicates which spiral point index is considered the first.")
+        ImGui.BulletText("Offsets can be negative and/or larger than the actual data count.")
+        s.offset = ImGui.SliderInt("Offset", s.offset, -2 * k_points_per, 2 * k_points_per)
+        if ImPlot3D.BeginPlot("##strideoffset", ImVec2(-1, 0)) then
+            ImPlot3D.PushColormap(Colormap.Jet)
+            for sp = 0, k_spirals - 1 do
+                -- [Port] &data[s*3+k] -> Ptr proxy; Stride is in elements (3*k_spirals doubles)
+                ImPlot3D.PlotLine(string.format("Spiral %d", sp), Ptr(data, sp * 3), Ptr(data, sp * 3 + 1), Ptr(data, sp * 3 + 2),
+                    k_points_per, { Offset = s.offset, Stride = 3 * k_spirals })
+            end
+            ImPlot3D.EndPlot()
+            ImPlot3D.PopColormap()
+        end
+    end
+
     -- @@TAIL@@
 end
