@@ -3098,6 +3098,268 @@ return function(G)
     end
 
     --------------------------------------------------------------------------
+    -- [SECTION] Getters, Renderers, RenderPrimitives (implot3d_items.cpp)
+    -- [Port] Getters are { Count, Get = function(g, idx) -> x, y, z } (idx 0-based), color getters ->
+    -- renderer fields Col/Cols/Alpha, size getters -> Size/Sizes. Hot loops work on scalars: the
+    -- plot->pixel transform and depth are cached per RenderPrimitivesEx call (no ImPlot3DPoint/ImVec2 per point).
+    --------------------------------------------------------------------------
+    do
+        local ImHasFlag = internal.ImHasFlag
+        local writef64, writeu32, sqrt, min, max = buffer.writef64, buffer.writeu32, math.sqrt, math.min, math.max
+        local VTX_STRIDE = G.VTX_STRIDE or 36
+        local HUGE = math.huge
+
+        -- Indexers / Getters
+        local function GetXYZ(g, idx)
+            local s, off = g.Stride, g.Offset
+            local i = (if off == 0 then idx else (off + idx) % g.Count) * s + 1
+            return g.Xs[i], g.Ys[i], g.Zs[i]
+        end
+        function internal.GetterXYZ(xs, ys, zs, count, offset, stride)
+            return { Xs = xs, Ys = ys, Zs = zs, Count = count, Offset = if count > 0 then internal.ImPosMod(offset or 0, count) else 0,
+                Stride = stride or 1, Get = GetXYZ }
+        end
+        local function GetLoop(g, idx) local inner = g.Getter return inner.Get(inner, idx % (g.Count - 1)) end
+        function internal.GetterLoop(getter) return { Getter = getter, Count = getter.Count + 1, Get = GetLoop } end
+
+        -- Transform cache (PlotToPixels + GetPointDepth as scalars)
+        local ax_tf, ax_td, ax_min, ax_size, ax_inv, ax_ndc = {}, {}, {}, {}, {}, {}
+        local qx, qy, qz, qw, vscale, cx, cy = 0, 0, 0, 1, 1, 0, 0
+        local function CacheTransform(plot)
+            for i = 0, 2 do
+                local a = plot.Axes[i]
+                ax_tf[i], ax_td[i] = a.TransformForward, a.TransformData
+                local r = if a.TransformForward ~= nil then a.ScaledRange else a.Range
+                ax_min[i], ax_size[i] = r.Min, r.Max - r.Min
+                ax_inv[i] = ImHasFlag(a.Flags, ImPlot3D.ImPlot3DAxisFlags.Invert)
+                ax_ndc[i] = a.NDCScale
+            end
+            local q = plot.Rotation
+            qx, qy, qz, qw = q.x, q.y, q.z, q.w
+            vscale = plot:GetViewScale()
+            local c = plot.PlotRect:GetCenter()
+            cx, cy = c.x, c.y
+        end
+        local function Rotate(x, y, z)
+            local ux, uy, uz = qy * z - qz * y, qz * x - qx * z, qx * y - qy * x
+            local vx, vy, vz = qy * uz - qz * uy, qz * ux - qx * uz, qx * uy - qy * ux
+            return x + 2 * (qw * ux + vx), y + 2 * (qw * uy + vy), z + 2 * (qw * uz + vz)
+        end
+        local function NDC(i, v)
+            local tf = ax_tf[i]
+            if tf ~= nil then v = tf(v, ax_td[i]) end
+            local t = (v - ax_min[i]) / ax_size[i]
+            return (if ax_inv[i] then 0.5 - t else t - 0.5) * ax_ndc[i]
+        end
+        local function ToPixels(x, y, z)
+            local rx, ry = Rotate(NDC(0, x), NDC(1, y), NDC(2, z))
+            return rx * vscale + cx, -ry * vscale + cy
+        end
+        local function Depth(x, y, z)
+            if ax_inv[0] then x = -x end
+            if ax_inv[1] then y = -y end
+            if ax_inv[2] then z = -z end
+            local _, _, rz = Rotate(x, y, z)
+            return rz
+        end
+        internal.CacheTransform, internal.TransformToPixels, internal.GetPointDepth = CacheTransform, ToPixels, Depth
+
+        -- Liang-Barsky clip against the cull box; returns t0, t1 or nil when outside
+        -- [Port] upstream lambda -> module-level helper on ct0/ct1 (no closure per call)
+        local bx0, by0, bz0, bx1, by1, bz1 = 0, 0, 0, 0, 0, 0
+        local ct0, ct1 = 0.0, 1.0
+        local function upd(p, q)
+            if p == 0.0 then return q >= 0.0 end
+            local r = q / p
+            if p < 0.0 then
+                if r > ct1 then return false end
+                if r > ct0 then ct0 = r end
+            else
+                if r < ct0 then return false end
+                if r < ct1 then ct1 = r end
+            end
+            return true
+        end
+        local function Clip(x0, y0, z0, x1, y1, z1)
+            if x0 >= bx0 and x0 <= bx1 and y0 >= by0 and y0 <= by1 and z0 >= bz0 and z0 <= bz1
+                and x1 >= bx0 and x1 <= bx1 and y1 >= by0 and y1 <= by1 and z1 >= bz0 and z1 <= bz1 then
+                return 0.0, 1.0
+            end
+            ct0, ct1 = 0.0, 1.0
+            local dx, dy, dz = x1 - x0, y1 - y0, z1 - z0
+            if not (upd(-dx, x0 - bx0) and upd(dx, bx1 - x0) and upd(-dy, y0 - by0) and upd(dy, by1 - y0)
+                and upd(-dz, z0 - bz0) and upd(dz, bz1 - z0)) then return nil end
+            return ct0, ct1
+        end
+
+        local function GetCol(r, prim)
+            local cols = r.Cols
+            if cols == nil then return r.Col end
+            local col = cols[prim + 1]
+            if r.Alpha < 1.0 then
+                local c = ImGui.ColorConvertU32ToFloat4(col)
+                c.w *= r.Alpha
+                col = ImGui.ColorConvertFloat4ToU32(c)
+            end
+            return col
+        end
+
+        local function PrimLine(dl, x1, y1, x2, y2, hw, col, u0, v0, u1, v1, z)
+            local dx, dy = x2 - x1, y2 - y1
+            local d2 = dx * dx + dy * dy
+            if d2 > 0 then local inv = 1 / sqrt(d2); dx *= inv; dy *= inv end
+            dx *= hw; dy *= hw
+            local b, o = dl.VtxBuffer.Buf, (dl._VtxWritePtr - 1) * VTX_STRIDE
+            writef64(b, o, x1 + dy); writef64(b, o + 8, y1 - dx); writef64(b, o + 16, u0); writef64(b, o + 24, v0); writeu32(b, o + 32, col)
+            o += VTX_STRIDE
+            writef64(b, o, x2 + dy); writef64(b, o + 8, y2 - dx); writef64(b, o + 16, u0); writef64(b, o + 24, v0); writeu32(b, o + 32, col)
+            o += VTX_STRIDE
+            writef64(b, o, x2 - dy); writef64(b, o + 8, y2 + dx); writef64(b, o + 16, u1); writef64(b, o + 24, v1); writeu32(b, o + 32, col)
+            o += VTX_STRIDE
+            writef64(b, o, x1 - dy); writef64(b, o + 8, y1 + dx); writef64(b, o + 16, u1); writef64(b, o + 24, v1); writeu32(b, o + 32, col)
+            local idx, id, iw = dl._VtxCurrentIdx, dl.IdxBuffer, dl._IdxWritePtr
+            id[iw] = idx; id[iw + 1] = idx + 1; id[iw + 2] = idx + 2
+            id[iw + 3] = idx; id[iw + 4] = idx + 2; id[iw + 5] = idx + 3
+            local zb, zw = dl.ZBuffer, dl._ZWritePtr
+            zb[zw] = z; zb[zw + 1] = z
+            dl._VtxWritePtr += 4; dl._IdxWritePtr = iw + 6; dl._VtxCurrentIdx = idx + 4; dl._ZWritePtr = zw + 2
+        end
+
+        local function LineInit(r)
+            local hw = r.HalfWeight
+            local u0, v0, u1, v1, fringe = ImGui.GetWindowDrawList():_SelectLineTexture(hw * 2.0, r.DLFlags)
+            r.HalfWeight, r.U0, r.V0, r.U1, r.V1 = hw + fringe * 0.5, u0, v0, u1, v1
+        end
+        local function WhiteInit(r)
+            local uv = ImGui.GetDrawListSharedData().TexUvWhitePixel
+            r.U, r.V = uv.x, uv.y
+        end
+
+        -- Shared segment render: clip, project, emit (P1 -> P2)
+        local function Segment(r, dl, prim, x1, y1, z1, x2, y2, z2)
+            local t0, t1 = Clip(x1, y1, z1, x2, y2, z2)
+            if t0 == nil then return false end
+            local dx, dy, dz = x2 - x1, y2 - y1, z2 - z1
+            local ax, ay = ToPixels(x1 + dx * t0, y1 + dy * t0, z1 + dz * t0)
+            local bx, by = ToPixels(x1 + dx * t1, y1 + dy * t1, z1 + dz * t1)
+            PrimLine(dl, ax, ay, bx, by, r.HalfWeight, GetCol(r, prim), r.U0, r.V0, r.U1, r.V1,
+                Depth((x1 + x2) * 0.5, (y1 + y2) * 0.5, (z1 + z2) * 0.5))
+            return true
+        end
+
+        local function LineStripRender(r, dl, prim)
+            local g = r.Getter
+            local x2, y2, z2 = g.Get(g, prim + 1)
+            local vis = Segment(r, dl, prim, r.X1, r.Y1, r.Z1, x2, y2, z2)
+            r.X1, r.Y1, r.Z1 = x2, y2, z2
+            return vis
+        end
+        local function LineStripSkipRender(r, dl, prim)
+            local g = r.Getter
+            local x2, y2, z2 = g.Get(g, prim + 1)
+            local x1, y1, z1 = r.X1, r.Y1, r.Z1
+            local vis = false
+            if x1 == x1 and y1 == y1 and z1 == z1 and x2 == x2 and y2 == y2 and z2 == z2 then
+                vis = Segment(r, dl, prim, x1, y1, z1, x2, y2, z2)
+            end
+            if x2 == x2 and y2 == y2 and z2 == z2 then r.X1, r.Y1, r.Z1 = x2, y2, z2 end
+            return vis
+        end
+        local function LineSegmentsRender(r, dl, prim)
+            local g = r.Getter
+            local x1, y1, z1 = g.Get(g, prim * 2)
+            local x2, y2, z2 = g.Get(g, prim * 2 + 1)
+            if x1 == x1 and y1 == y1 and z1 == z1 and x2 == x2 and y2 == y2 and z2 == z2 then
+                return Segment(r, dl, prim, x1, y1, z1, x2, y2, z2)
+            end
+            return false
+        end
+        local line_renders = { Strip = LineStripRender, StripSkip = LineStripSkipRender, Segments = LineSegmentsRender }
+        -- kind: "Strip" | "StripSkip" | "Segments"
+        function internal.RendererLine(kind, getter, weight)
+            local r = { Getter = getter, HalfWeight = max(1.0, weight) * 0.5, IdxConsumed = 6, VtxConsumed = 4,
+                Prims = if kind == "Segments" then getter.Count // 2 else getter.Count - 1,
+                Init = LineInit, Render = line_renders[kind] }
+            if kind ~= "Segments" then r.X1, r.Y1, r.Z1 = getter.Get(getter, 0) end
+            return r
+        end
+
+        local function MarkersFillRender(r, dl, prim)
+            local g = r.Getter
+            local x, y, z = g.Get(g, prim)
+            if not (x >= bx0 and x <= bx1 and y >= by0 and y <= by1 and z >= bz0 and z <= bz1) then return false end
+            local px, py = ToPixels(x, y, z)
+            local col = GetCol(r, prim)
+            local size = if r.Sizes then r.Sizes[prim + 1] else r.Size
+            local m, count, u, v = r.Marker, r.Count, r.U, r.V
+            local b, o = dl.VtxBuffer.Buf, (dl._VtxWritePtr - 1) * VTX_STRIDE
+            for i = 0, count - 1 do
+                writef64(b, o, px + m[i * 2 + 1] * size); writef64(b, o + 8, py + m[i * 2 + 2] * size)
+                writef64(b, o + 16, u); writef64(b, o + 24, v); writeu32(b, o + 32, col)
+                o += VTX_STRIDE
+            end
+            local idx, id, iw = dl._VtxCurrentIdx, dl.IdxBuffer, dl._IdxWritePtr
+            local zb, zw, depth = dl.ZBuffer, dl._ZWritePtr, Depth(x, y, z)
+            for i = 2, count - 1 do
+                id[iw] = idx; id[iw + 1] = idx + i - 1; id[iw + 2] = idx + i
+                iw += 3
+                zb[zw] = depth; zw += 1
+            end
+            dl._VtxWritePtr += count; dl._IdxWritePtr = iw; dl._VtxCurrentIdx = idx + count; dl._ZWritePtr = zw
+            return true
+        end
+        function internal.RendererMarkersFill(getter, marker, count)
+            return { Prims = getter.Count, IdxConsumed = (count - 2) * 3, VtxConsumed = count,
+                Getter = getter, Marker = marker, Count = count, Init = WhiteInit, Render = MarkersFillRender }
+        end
+
+        local function MarkersLineRender(r, dl, prim)
+            local g = r.Getter
+            local x, y, z = g.Get(g, prim)
+            if not (x >= bx0 and x <= bx1 and y >= by0 and y <= by1 and z >= bz0 and z <= bz1) then return false end
+            local px, py = ToPixels(x, y, z)
+            local col = GetCol(r, prim)
+            local size = if r.Sizes then r.Sizes[prim + 1] else r.Size
+            local m, hw, depth = r.Marker, r.HalfWeight, Depth(x, y, z)
+            for i = 0, r.Count - 1, 2 do
+                PrimLine(dl, px + m[i * 2 + 1] * size, py + m[i * 2 + 2] * size, px + m[i * 2 + 3] * size, py + m[i * 2 + 4] * size,
+                    hw, col, r.U0, r.V0, r.U1, r.V1, depth)
+            end
+            return true
+        end
+        function internal.RendererMarkersLine(getter, marker, count, weight)
+            return { Prims = getter.Count, IdxConsumed = count // 2 * 6, VtxConsumed = count // 2 * 4,
+                Getter = getter, Marker = marker, Count = count, HalfWeight = max(1.0, weight) * 0.5,
+                Init = LineInit, Render = MarkersLineRender }
+        end
+
+        -- [Port] color getter (GetterConstColor/GetterIdxColor) and size getter folded into renderer fields
+        function internal.RenderPrimitivesEx(r, col, cols, alpha, size, sizes)
+            local plot = GImPlot3D.CurrentPlot
+            local dl = plot.DrawList
+            r.Col, r.Cols, r.Alpha, r.Size, r.Sizes, r.DLFlags = col, cols, alpha or 1.0, size, sizes, dl._Flags
+            if ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.NoClip) then
+                bx0, by0, bz0, bx1, by1, bz1 = -HUGE, -HUGE, -HUGE, HUGE, HUGE, HUGE
+            else
+                local a = plot.Axes
+                bx0, by0, bz0 = a[0].Range.Min, a[1].Range.Min, a[2].Range.Min
+                bx1, by1, bz1 = a[0].Range.Max, a[1].Range.Max, a[2].Range.Max
+            end
+            CacheTransform(plot)
+            -- Find how many can be reserved up to end of current draw command's limit
+            local prims = min(r.Prims, (internal.ImDrawList3D_MaxIdx - dl._VtxCurrentIdx) // r.VtxConsumed)
+            if prims <= 0 then return end
+            dl:PrimReserve(prims * r.IdxConsumed, prims * r.VtxConsumed)
+            r.Init(r)
+            local render, culled = r.Render, 0
+            for i = 0, prims - 1 do
+                if not render(r, dl, i) then culled += 1 end
+            end
+            dl:PrimUnreserve(culled * r.IdxConsumed, culled * r.VtxConsumed)
+        end
+    end
+
+    --------------------------------------------------------------------------
     -- [SECTION] ImDrawList3D
     -- [Port] VtxBuffer is an ImDrawVtxBuffer (same 36-byte vertex layout as ImDrawList), IdxBuffer/ZBuffer are
     -- 1-based Lua arrays sized by IdxSize/ZSize (never shrunk, so no per-frame allocation). Write ptrs are 1-based;
