@@ -1,4 +1,4 @@
--- HandleInput: right drag rotates, wheel zooms (range shrinks), left double click refits
+-- HandleInput: right drag rotates, wheel zooms (range shrinks), left double click refits, right click opens a context menu
 local RS = game:GetService("ReplicatedStorage")
 local G = require(RS:WaitForChild("ImGui"))
 local ImPlot3D = require(RS:WaitForChild("ImPlot3D"))(G)
@@ -10,7 +10,7 @@ ImPlot3D.CreateContext()
 local io = ImGui.GetIO()
 
 local f, done = 0, false
-local center, rot0, sizes0, fit0
+local center, rot0, sizes0, fit0, opened
 local function sizes(plot) return { plot.Axes[0].Range:Size(), plot.Axes[1].Range:Size(), plot.Axes[2].Range:Size() } end
 game:GetService("RunService").Stepped:Connect(function()
     if done then return end
@@ -25,6 +25,7 @@ game:GetService("RunService").Stepped:Connect(function()
         if f == 14 then io:AddMouseWheelEvent(0, 1) end
         if f == 18 or f == 20 then io:AddMouseButtonEvent(0, true) end
         if f == 19 or f == 21 then io:AddMouseButtonEvent(0, false) end
+        if f == 25 then io:AddMouseButtonEvent(1, true) elseif f == 26 then io:AddMouseButtonEvent(1, false) end
     end
     ImGui.NewFrame()
     ImGui.SetNextWindowPos(ImVec2(0, 0))
@@ -53,7 +54,12 @@ game:GetService("RunService").Stepped:Connect(function()
         local s = sizes(plot)
         for i = 1, 3 do assert(math.abs(s[i] - fit0[i]) < 1e-9, ("double click refits axis %d: %g vs %g"):format(i, s[i], fit0[i])) end
     end
+    local popup = false
+    for _, id in { "##YZPlaneContext", "##XZPlaneContext", "##XYPlaneContext", "##PlotContext" } do popup = popup or ImGui.IsPopupOpen(id) end
+    assert(not popup or f > 26, "context menu opened early")
+    assert(popup or not opened, "context menu closed")
+    if popup then opened = f end
     ImGui.End()
     ImGui.Render(); G.ImGui_ImplRoblox.RenderDrawData(ImGui.GetDrawData())
-    if f == 23 then done = true; print("OK") end
+    if f == 120 then assert(opened, "right click opens context menu"); done = true; print("OK") end
 end)

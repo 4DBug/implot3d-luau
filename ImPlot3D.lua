@@ -2058,6 +2058,164 @@ return function(G)
             end
         end
 
+        local axis_labels = { [0] = "X-Axis", "Y-Axis", "Z-Axis" }
+        local plane_labels = { [0] = "YZ-Plane", "XZ-Plane", "XY-Plane" }
+        local short_legend_location = { [0] = "C", [1] = "N", [2] = "S", [4] = "W", [8] = "E", [5] = "NW", [9] = "NE", [6] = "SW", [10] = "SE" }
+        function internal.GetShortLegendLocationName(loc) return short_legend_location[loc] end
+
+        -- [Port] returns true when "Show" toggled (visible passed by value)
+        function internal.ShowLegendContextMenu(legend, visible)
+            local Loc, LF = ImPlot3D.ImPlot3DLocation, ImPlot3D.ImPlot3DLegendFlags
+            local s = ImGui.GetFrameHeight()
+            local ret = ImGui.Checkbox("Show", visible)
+            local horiz = ImHasFlag(legend.Flags, LF.Horizontal)
+            if ImGui.RadioButton("H", horiz) then legend.Flags = bit32.bor(legend.Flags, LF.Horizontal) end
+            ImGui.SameLine()
+            if ImGui.RadioButton("V", not horiz) then legend.Flags = bit32.band(legend.Flags, bit32.bnot(LF.Horizontal)) end
+            ImGui.PushStyleVar(G.ImGuiStyleVar.ItemSpacing, ImVec2(2, 2))
+            local size = ImVec2(1.5 * s, s)
+            local rows = { { Loc.NorthWest, Loc.North, Loc.NorthEast }, { Loc.West, Loc.Center, Loc.East }, { Loc.SouthWest, Loc.South, Loc.SouthEast } }
+            for _, row in rows do
+                for j, loc in row do
+                    if loc == Loc.Center then
+                        ImGui.InvisibleButton(short_legend_location[loc], size)
+                    elseif ImGui.Button(short_legend_location[loc], size) then
+                        legend.Location = loc
+                    end
+                    if j < 3 then ImGui.SameLine() end
+                end
+            end
+            ImGui.PopStyleVar()
+            return ret
+        end
+
+        local function FlipFlag(t, k, flag) t[k] = bit32.bxor(t[k], flag) end
+
+        function internal.ShowAxisContextMenu(plot, axis_id)
+            ImGui.PushItemWidth(75)
+            local axis = plot.Axes[axis_id]
+            local always_locked = axis:IsRangeLocked() or axis:IsAutoFitting()
+            local size = axis.Range:Size()
+            local drag_speed = if size <= 2.220446049250313e-16 then 2.220446049250313e-16 * 1.0e+13 else 0.01 * size -- Recover from almost equal axis limits
+            local equal_aspect = ImHasFlag(plot.Flags, ImPlot3D.ImPlot3DFlags.Equal)
+            local Double = G.ImGuiDataType.Double
+
+            ImGui.BeginDisabled(always_locked)
+            local _, fl = ImGui.CheckboxFlags("##LockMin", axis.Flags, AxisFlags.LockMin); axis.Flags = fl
+            ImGui.EndDisabled()
+            ImGui.SameLine()
+            ImGui.BeginDisabled(axis:IsLockedMin() or always_locked)
+            local v, changed = ImGui.DragScalar("Min", Double, axis.Range.Min, drag_speed, axis.ConstraintRange.Min, axis.Range.Max)
+            if changed then
+                axis:SetMin(v, true)
+                if equal_aspect then plot:ApplyEqualAspect(axis_id) end
+            end
+            ImGui.EndDisabled()
+
+            ImGui.BeginDisabled(always_locked)
+            _, fl = ImGui.CheckboxFlags("##LockMax", axis.Flags, AxisFlags.LockMax); axis.Flags = fl
+            ImGui.EndDisabled()
+            ImGui.SameLine()
+            ImGui.BeginDisabled(axis:IsLockedMax() or always_locked)
+            v, changed = ImGui.DragScalar("Max", Double, axis.Range.Max, drag_speed, axis.Range.Min, axis.ConstraintRange.Max)
+            if changed then
+                axis:SetMax(v, true)
+                if equal_aspect then plot:ApplyEqualAspect(axis_id) end
+            end
+            ImGui.EndDisabled()
+            ImGui.Separator()
+
+            _, fl = ImGui.CheckboxFlags("Auto-Fit", axis.Flags, AxisFlags.AutoFit); axis.Flags = fl
+            ImGui.Separator()
+            if ImGui.Checkbox("Invert", ImHasFlag(axis.Flags, AxisFlags.Invert)) then FlipFlag(axis, "Flags", AxisFlags.Invert) end
+            ImGui.Separator()
+            ImGui.BeginDisabled(axis.Label == "")
+            if ImGui.Checkbox("Label", axis:HasLabel()) then FlipFlag(axis, "Flags", AxisFlags.NoLabel) end
+            ImGui.EndDisabled()
+            if ImGui.Checkbox("Grid Lines", axis:HasGridLines()) then FlipFlag(axis, "Flags", AxisFlags.NoGridLines) end
+            if ImGui.Checkbox("Tick Marks", axis:HasTickMarks()) then FlipFlag(axis, "Flags", AxisFlags.NoTickMarks) end
+            if ImGui.Checkbox("Tick Labels", axis:HasTickLabels()) then FlipFlag(axis, "Flags", AxisFlags.NoTickLabels) end
+            ImGui.PopItemWidth() -- [Port] upstream leaks this PushItemWidth
+        end
+
+        local function AxisMenus(plot, skip)
+            for i = 0, 2 do
+                if i ~= skip then
+                    local axis = plot.Axes[i]
+                    ImGui.PushID(i)
+                    if ImGui.BeginMenu(if axis:HasLabel() then axis:GetLabel() else axis_labels[i]) then
+                        internal.ShowAxisContextMenu(plot, i)
+                        ImGui.EndMenu()
+                    end
+                    ImGui.PopID()
+                end
+            end
+        end
+
+        function internal.ShowPlaneContextMenu(plot, plane_idx) AxisMenus(plot, plane_idx) end
+
+        function internal.ShowPlotContextMenu(plot)
+            local Flags = ImPlot3D.ImPlot3DFlags
+            AxisMenus(plot, -1)
+            ImGui.Separator()
+            if ImGui.BeginMenu("Box") then
+                ImGui.PushItemWidth(75)
+                for i, name in { [0] = "Scale X", "Scale Y", "Scale Z" } do
+                    local v, changed = ImGui.DragFloat(name, plot.Axes[i].NDCScale, 0.01, 0.1, 3.0)
+                    if changed then plot.Axes[i].NDCScale = math.max(v, 0.01) end
+                end
+                ImGui.PopItemWidth()
+                ImGui.EndMenu()
+            end
+            ImGui.Separator()
+            if ImGui.BeginMenu("Legend") then
+                if internal.ShowLegendContextMenu(plot.Items.Legend, not ImHasFlag(plot.Flags, Flags.NoLegend)) then FlipFlag(plot, "Flags", Flags.NoLegend) end
+                ImGui.EndMenu()
+            end
+            if ImGui.BeginMenu("Settings") then
+                if ImGui.MenuItem("Equal", nil, ImHasFlag(plot.Flags, Flags.Equal)) then FlipFlag(plot, "Flags", Flags.Equal) end
+                ImGui.BeginDisabled(plot.Title == "")
+                if ImGui.MenuItem("Title", nil, plot:HasTitle()) then FlipFlag(plot, "Flags", Flags.NoTitle) end
+                ImGui.EndDisabled()
+                if ImGui.MenuItem("Clip", nil, not ImHasFlag(plot.Flags, Flags.NoClip)) then FlipFlag(plot, "Flags", Flags.NoClip) end
+                if ImGui.MenuItem("Mouse Position", nil, not ImHasFlag(plot.Flags, Flags.NoMouseText)) then FlipFlag(plot, "Flags", Flags.NoMouseText) end
+                ImGui.EndMenu()
+            end
+        end
+
+        -- [Port] EndPlot's mouse text + context menu popups
+        function internal.ShowPlotPopups(plot)
+            local Flags = ImPlot3D.ImPlot3DFlags
+            internal.RenderMousePos()
+            if ImGui.BeginPopup("##LegendContext") then
+                ImGui.Text("Legend")
+                ImGui.Separator()
+                if internal.ShowLegendContextMenu(plot.Items.Legend, not ImHasFlag(plot.Flags, Flags.NoLegend)) then FlipFlag(plot, "Flags", Flags.NoLegend) end
+                ImGui.EndPopup()
+            end
+            for i = 0, 2 do
+                local axis = plot.Axes[i]
+                if ImGui.BeginPopup(axis_contexts[i]) then
+                    ImGui.TextUnformatted(if axis:HasLabel() then axis:GetLabel() else axis_labels[i])
+                    ImGui.Separator()
+                    internal.ShowAxisContextMenu(plot, i)
+                    ImGui.EndPopup()
+                end
+            end
+            for i = 0, 2 do
+                if ImGui.BeginPopup(plane_contexts[i]) then
+                    ImGui.Text(plane_labels[i])
+                    ImGui.Separator()
+                    internal.ShowPlaneContextMenu(plot, i)
+                    ImGui.EndPopup()
+                end
+            end
+            if ImGui.BeginPopup("##PlotContext") then
+                internal.ShowPlotContextMenu(plot)
+                ImGui.EndPopup()
+            end
+        end
+
         function ImPlot3D.SetupLock()
             local gp = GImPlot3D
             IM_ASSERT(gp.CurrentPlot ~= nil, "SetupLock() needs to be called between BeginPlot() and EndPlot()!")
@@ -2809,7 +2967,9 @@ return function(G)
             ImGui.PopClipRect()
             -- Reset legend hover
             plot.Items.Legend.Hovered = false
-            -- [Port] TODO: RenderLegend, RenderMousePos, legend/axis/plane/plot context menus
+            -- [Port] TODO: RenderLegend (added with items)
+            -- Mouse position text and context menus
+            internal.ShowPlotPopups(plot)
             -- Pop frame rect clipping
             ImGui.PopClipRect()
             -- Reset current plot
