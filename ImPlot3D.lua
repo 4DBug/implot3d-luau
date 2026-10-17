@@ -1028,10 +1028,10 @@ return function(G)
     -- [SECTION] Context / Context Utils
     --------------------------------------------------------------------------
     do
-        -- [Port] only Style and Colormap fields so far; later milestones add the rest.
+        -- [Port] NextItemData added with the item milestone.
         function internal.ImPlot3DContext()
             return {
-                Plots = nil, -- [Port] ImPool<ImPlot3DPlot>, added with BeginPlot/EndPlot
+                Plots = G.ImPool(function() return internal.ImPlot3DPlot() end), -- ImPool<ImPlot3DPlot>
                 CurrentPlot = nil,
                 CurrentItems = nil,
                 CurrentItem = nil,
@@ -1540,6 +1540,99 @@ return function(G)
             self.FitExtents.Min = HUGE_VAL
             self.FitExtents.Max = -HUGE_VAL
         end
+    end
+
+    --------------------------------------------------------------------------
+    -- [SECTION] ImPlot3DLegend, ImPlot3DItemGroup (data only), ImPlot3DPlot
+    --------------------------------------------------------------------------
+    do
+        local P, Q = ImPlot3D.ImPlot3DPoint, ImPlot3D.ImPlot3DQuat
+        local ImHasFlag, ImNanOrInf = internal.ImHasFlag, internal.ImNanOrInf
+        local ImRect = G.ImRect
+
+        -- Holds legend state
+        function internal.ImPlot3DLegend()
+            local loc = ImPlot3D.ImPlot3DLocation.NorthWest
+            return {
+                Flags = 0, PreviousFlags = 0, Location = loc, PreviousLocation = loc,
+                Scroll = ImVec2(0, 0), Indices = {}, Labels = "",
+                Rect = ImRect(), RectClamped = ImRect(), Hovered = false, Held = false,
+            }
+        end
+
+        -- Holds items
+        -- [Port] item methods (GetItem, GetOrAddItem, ...) come with the item milestone
+        function internal.ImPlot3DItemGroup()
+            return { ID = 0, ItemPool = G.ImPool(), Legend = internal.ImPlot3DLegend(), ColormapIdx = 0, MarkerIdx = 0 }
+        end
+
+        local Plot = {}
+        Plot.__index = Plot
+
+        -- Holds plot state information that must persist after EndPlot
+        function internal.ImPlot3DPlot()
+            local rot = Q(0.0, 0.0, 0.0, 1.0)
+            return setmetatable({
+                ID = 0, Flags = 0, PreviousFlags = 0, Title = "",
+                JustCreated = true, Initialized = false,
+                FrameRect = ImRect(), CanvasRect = ImRect(), PlotRect = ImRect(),
+                InitialRotation = Q(-0.513269, -0.212596, -0.318184, 0.76819),
+                Rotation = rot, RotationCond = ImPlot3D.ImPlot3DCond.None,
+                Axes = { [0] = internal.ImPlot3DAxis(), internal.ImPlot3DAxis(), internal.ImPlot3DAxis() }, -- [Port] 0-based like ImAxis3D
+                AnimationTime = 0.0, RotationAnimationEnd = rot,
+                SetupLocked = false, Hovered = false, Held = false,
+                HeldEdgeIdx = -1, HeldPlaneIdx = -1, DragRotationAxis = P(0.0, 0.0, 0.0),
+                FitThisFrame = true,
+                Items = internal.ImPlot3DItemGroup(),
+                DrawList = nil, -- [Port] ImDrawList3D, added with rendering
+                ContextClick = false, OpenContextThisFrame = false,
+            }, Plot)
+        end
+
+        function Plot:SetTitle(title)
+            if title and (string.find(title, "##", 1, true) or #title + 1) > 1 then self.Title = title else self.Title = "" end
+        end
+        function Plot:HasTitle() return self.Title ~= "" and not ImHasFlag(self.Flags, ImPlot3D.ImPlot3DFlags.NoTitle) end
+        function Plot:GetTitle() return self.Title end
+        function Plot:IsRotationLocked() return self.RotationCond == ImPlot3D.ImPlot3DCond.Always end
+
+        -- Extends the fit range of all three axes to include the provided point
+        function Plot:ExtendFit(point)
+            for i = 0, 2 do
+                if not ImNanOrInf(point[i]) and self.Axes[i].FitThisFrame then self.Axes[i]:ExtendFit(point[i]) end
+            end
+        end
+
+        function Plot:RangeMin() local a = self.Axes return P(a[0].Range.Min, a[1].Range.Min, a[2].Range.Min) end
+        function Plot:RangeMax() local a = self.Axes return P(a[0].Range.Max, a[1].Range.Max, a[2].Range.Max) end
+        function Plot:RangeCenter()
+            local a = self.Axes
+            return P((a[0].Range.Min + a[0].Range.Max) * 0.5, (a[1].Range.Min + a[1].Range.Max) * 0.5, (a[2].Range.Min + a[2].Range.Max) * 0.5)
+        end
+
+        function Plot:SetRange(min, max)
+            self.Axes[0]:SetRange(min.x, max.x)
+            self.Axes[1]:SetRange(min.y, max.y)
+            self.Axes[2]:SetRange(min.z, max.z)
+        end
+
+        -- Constant to convert from NDC coordinates to pixels coordinates
+        function Plot:GetViewScale()
+            return math.min(self.PlotRect:GetWidth(), self.PlotRect:GetHeight()) / 1.8 * GImPlot3D.Style.ViewScaleFactor
+        end
+
+        function Plot:GetBoxScale() return P(self.Axes[0]:NDCSize(), self.Axes[1]:NDCSize(), self.Axes[2]:NDCSize()) end
+
+        -- Applies equal aspect ratio constraint using the specified axis as reference.
+        function Plot:ApplyEqualAspect(ref_axis)
+            local aspect = self.Axes[ref_axis]:GetAspect()
+            for i = 0, 2 do
+                if i ~= ref_axis and not self.Axes[i]:IsInputLocked() then self.Axes[i]:SetAspect(aspect) end
+            end
+        end
+
+        function internal.GetCurrentPlot() return GImPlot3D.CurrentPlot end
+        function internal.BustPlotCache() GImPlot3D.Plots:Clear() end
     end
 
     return ImPlot3D

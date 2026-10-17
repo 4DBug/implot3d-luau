@@ -39,4 +39,11 @@ ax:SetRange(5, -5)
 assert(ax.Range.Min == -5 and ax.Range.Max == 5)
 assert(near(ax:NDCToPlot(ax:PlotToNDC(3.3)), 3.3))
 
+-- Plot + context pool
+local ctx = ImPlot3D.CreateContext()
+local plot = ctx.Plots:GetOrAddByKey(123)
+assert(ctx.Plots:GetByKey(123) == plot and plot.Axes[0].Range.Max == 1)
+plot:ExtendFit(ImPlot3D.ImPlot3DPoint(1, 2, 3))
+assert(plot.Axes[2].FitExtents.Max == 3)
+
 print("OK")
