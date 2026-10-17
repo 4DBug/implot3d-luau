@@ -696,5 +696,187 @@ return function(G, ImPlot3D)
         end
     end
 
+    local Scale = ImPlot3D.ImPlot3DScale
+    S.Demo_LogScale = { xs = {}, ys1 = {}, ys2 = {}, ys3 = {}, zs = {} }
+    for i = 1, 1001 do
+        local s, x = S.Demo_LogScale, (i - 1) * 0.1
+        s.xs[i], s.ys1[i], s.ys2[i], s.ys3[i], s.zs[i] = x, math.sin(x) + 1, math.log(x), 10 ^ x, 0.0
+    end
+    function D.Demo_LogScale()
+        IMGUI_DEMO_MARKER("Axes/Log Scale")
+        local s = S.Demo_LogScale
+        if ImPlot3D.BeginPlot("Log Plot 3D", ImVec2(-1, 0)) then
+            ImPlot3D.SetupAxisScale(ImAxis3D.X, Scale.Log10)
+            ImPlot3D.SetupAxesLimits(0.1, 100, 0, 10, -1, 1)
+            ImPlot3D.PlotLine("f(x) = x", s.xs, s.xs, s.zs, 1001)
+            ImPlot3D.PlotLine("f(x) = sin(x)+1", s.xs, s.ys1, s.zs, 1001)
+            ImPlot3D.PlotLine("f(x) = log(x)", s.xs, s.ys2, s.zs, 1001)
+            ImPlot3D.PlotLine("f(x) = 10^x", s.xs, s.ys3, s.zs, 21)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.Demo_SymmetricLogScale = { xs = {}, ys1 = {}, ys2 = {}, zs = {} }
+    for i = 1, 1001 do
+        local s, x = S.Demo_SymmetricLogScale, (i - 1) * 0.1 - 50
+        s.xs[i], s.ys1[i], s.ys2[i], s.zs[i] = x, math.sin(x), (i - 1) * 0.002 - 1, 0.0
+    end
+    function D.Demo_SymmetricLogScale()
+        IMGUI_DEMO_MARKER("Axes/Symmetric Log Scale")
+        local s = S.Demo_SymmetricLogScale
+        if ImPlot3D.BeginPlot("SymLog Plot", ImVec2(-1, 0)) then
+            ImPlot3D.SetupAxisScale(ImAxis3D.X, Scale.SymLog)
+            ImPlot3D.PlotLine("f(x) = a*x+b", s.xs, s.ys2, s.zs, 1001)
+            ImPlot3D.PlotLine("f(x) = sin(x)", s.xs, s.ys1, s.zs, 1001)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoTickLabels = { custom_fmt = true, custom_ticks = false, custom_labels = true }
+    local letters_ticks, letters_labels = { 0.0, 0.2, 0.4, 0.6, 0.8, 1.0 }, { "A", "B", "C", "D", "E", "F" }
+    function D.DemoTickLabels()
+        IMGUI_DEMO_MARKER("Axes/Tick Labels")
+        local s = S.DemoTickLabels
+        _, s.custom_fmt = ImGui.Checkbox("Show Custom Format", s.custom_fmt)
+        ImGui.SameLine()
+        _, s.custom_ticks = ImGui.Checkbox("Show Custom Ticks", s.custom_ticks)
+        if s.custom_ticks then
+            ImGui.SameLine()
+            _, s.custom_labels = ImGui.Checkbox("Show Custom Labels", s.custom_labels)
+        end
+        if ImPlot3D.BeginPlot("##Ticks") then
+            ImPlot3D.SetupAxesLimits(2, 5, 0, 1, 0, 1000)
+            if s.custom_fmt then
+                ImPlot3D.SetupAxisFormat(ImAxis3D.Y, MetricFormatter, "Hz")
+                ImPlot3D.SetupAxisFormat(ImAxis3D.Z, MetricFormatter, "m")
+            end
+            if s.custom_ticks then
+                local labels = if s.custom_labels then letters_labels else nil
+                ImPlot3D.SetupAxisTicks(ImAxis3D.X, { 3.14 }, 1, if s.custom_labels then { "PI" } else nil, true)
+                ImPlot3D.SetupAxisTicks(ImAxis3D.Y, letters_ticks, 6, labels, false)
+                ImPlot3D.SetupAxisTicks(ImAxis3D.Z, 0, 1000, 6, labels, false)
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoAxisConstraints = { limits = { -10, 10 }, zoom = { 1, 20 }, flags = 0 }
+    function D.DemoAxisConstraints()
+        IMGUI_DEMO_MARKER("Axes/Axis Constraints")
+        local s = S.DemoAxisConstraints
+        ImGui.DragFloat2("Limits Constraints", s.limits, 0.01)
+        ImGui.DragFloat2("Zoom Constraints", s.zoom, 0.01)
+        s.flags = CHECKBOX_FLAG(s.flags, "ImPlot3DAxisFlags_PanStretch", AxisFlags.PanStretch)
+        if ImPlot3D.BeginPlot("##AxisConstraints", ImVec2(-1, 0)) then
+            ImPlot3D.SetupAxes("X", "Y", "Z", s.flags, s.flags, s.flags)
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -1, 1)
+            for a = 0, 2 do
+                ImPlot3D.SetupAxisLimitsConstraints(a, s.limits[1], s.limits[2])
+                ImPlot3D.SetupAxisZoomConstraints(a, s.zoom[1], s.zoom[2])
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoEqualAxes = { flags = Flags.Equal, cx = {}, cy = {}, cz = {}, hx = {}, hy = {}, hz = {} }
+    for i = 0, 359 do
+        local s, angle = S.DemoEqualAxes, i * 2 * IM_PI / 359.0
+        s.cx[i + 1], s.cy[i + 1], s.cz[i + 1] = math.cos(angle), math.sin(angle), 0 -- Circle in XY plane at Z=0
+        s.hx[i + 1], s.hy[i + 1], s.hz[i + 1] = 0.5 * math.cos(angle), 0.5 * math.sin(angle), i / 359.0 * 2.0 - 1.0 -- Helix
+    end
+    local square_xs, square_ys, square_zs = { -0.5, 0.5, 0.5, -0.5, -0.5 }, { -0.5, -0.5, 0.5, 0.5, -0.5 }, { -0.5, -0.5, -0.5, -0.5, -0.5 }
+    function D.DemoEqualAxes()
+        IMGUI_DEMO_MARKER("Axes/Equal Axes")
+        local s = S.DemoEqualAxes
+        ImGui.BulletText("Equal constraint applies to all three axes (X, Y, Z)")
+        ImGui.BulletText("When enabled, the axes maintain the same units/pixel ratio")
+        s.flags = CHECKBOX_FLAG(s.flags, "ImPlot3DFlags_Equal", Flags.Equal)
+        if ImPlot3D.BeginPlot("##EqualAxes", ImVec2(-1, 0), s.flags) then
+            ImPlot3D.SetupAxes("X-Axis", "Y-Axis", "Z-Axis")
+            ImPlot3D.PlotLine("Circle", s.cx, s.cy, s.cz, 360)
+            ImPlot3D.PlotLine("Helix", s.hx, s.hy, s.hz, 360)
+            ImPlot3D.PlotLine("Square", square_xs, square_ys, square_zs, 5)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    S.DemoAutoFittingData = { xflags = AxisFlags.None, yflags = AxisFlags.None, zflags = AxisFlags.AutoFit, x = {}, y = {}, z = {} }
+    for i = 0, 100 do
+        local s = S.DemoAutoFittingData
+        s.x[i + 1], s.y[i + 1], s.z[i + 1] = i * 0.1, i * 0.1, 1 + math.sin(i / 10.0)
+    end
+    function D.DemoAutoFittingData()
+        IMGUI_DEMO_MARKER("Axes/Auto-Fitting Data")
+        local s = S.DemoAutoFittingData
+        ImGui.BulletText("Axes can be configured to auto-fit to data extents.")
+        ImGui.BulletText("Try panning and zooming to see the axes adjust.")
+        ImGui.BulletText("Disable AutoFit on an axis to fix its range.")
+        for _, a in { "x", "y", "z" } do
+            ImGui.TextUnformatted(string.upper(a) .. ": ")
+            ImGui.SameLine()
+            _, s[a .. "flags"] = ImGui.CheckboxFlags("ImPlot3DAxisFlags_AutoFit##" .. string.upper(a), s[a .. "flags"], AxisFlags.AutoFit)
+        end
+        if ImPlot3D.BeginPlot("##AutoFitting") then
+            ImPlot3D.SetupAxes("X-Axis", "Y-Axis", "Z-Axis", s.xflags, s.yflags, s.zflags)
+            ImPlot3D.PlotLine("Wave", s.x, s.y, s.z, 101)
+            ImPlot3D.EndPlot()
+        end
+    end
+
+    ---------------------------------------------------------------------------
+    -- [SECTION] Tools
+    ---------------------------------------------------------------------------
+
+    local Plane = ImPlot3D.ImPlane3D
+    S.DemoMousePicking = { points = {}, rays = {}, selected_plane = Plane.XY, mask_plane = true }
+    function D.DemoMousePicking()
+        IMGUI_DEMO_MARKER("Tools/Mouse Picking")
+        local s = S.DemoMousePicking
+        ImGui.BulletText("Click anywhere in the plot to place points/rays.")
+        _, s.selected_plane = ImGui.RadioButton("XY-Plane", s.selected_plane, Plane.XY)
+        ImGui.SameLine()
+        _, s.selected_plane = ImGui.RadioButton("XZ-Plane", s.selected_plane, Plane.XZ)
+        ImGui.SameLine()
+        _, s.selected_plane = ImGui.RadioButton("YZ-Plane", s.selected_plane, Plane.YZ)
+        _, s.mask_plane = ImGui.Checkbox("Mask Plane", s.mask_plane)
+        if ImGui.Button("Clear") then
+            table.clear(s.points)
+            table.clear(s.rays)
+        end
+        if ImPlot3D.BeginPlot("Mouse Picking", ImVec2(-1, 0), Flags.NoClip) then
+            ImPlot3D.SetupAxes("X-Axis", "Y-Axis", "Z-Axis")
+            ImPlot3D.SetupAxesLimits(-1, 1, -1, 1, -1, 1)
+            -- Get mouse position and convert to ray / point on the selected plane
+            local mouse_pos = ImGui.GetMousePos()
+            local ray = ImPlot3D.PixelsToPlotRay(mouse_pos)
+            local point = ImPlot3D.PixelsToPlotPlane(mouse_pos, s.selected_plane, s.mask_plane)
+            -- Show intersection point
+            if ImGui.IsItemHovered() and not point:IsNaN() then
+                ImPlot3D.PlotScatter("##Intersection", { point.x }, { point.y }, { point.z }, 1,
+                    { Marker = Marker.Circle, MarkerSize = 5, FillColor = ImVec4(1, 1, 0, 1) })
+            end
+            -- Add point/ray on click
+            if ImGui.IsItemHovered() and ImGui.IsMouseClicked(0) and not point:IsNaN() then
+                table.insert(s.points, point)
+                table.insert(s.rays, ray)
+            end
+            -- [Port] ImVector<ImPlot3DPoint> + Stride = sizeof(ImPlot3DPoint) -> split x/y/z arrays
+            if #s.points > 0 then
+                local xs, ys, zs = {}, {}, {}
+                for i, p in s.points do xs[i], ys[i], zs[i] = p.x, p.y, p.z end
+                ImPlot3D.PlotScatter("Placed Points", xs, ys, zs, #xs, { Marker = Marker.Circle, MarkerSize = 3 })
+                -- Ray from added point to the camera
+                local rx, ry, rz = {}, {}, {}
+                for i, p in s.points do
+                    local d = s.rays[i].Direction
+                    table.insert(rx, p.x); table.insert(ry, p.y); table.insert(rz, p.z)
+                    table.insert(rx, p.x - d.x); table.insert(ry, p.y - d.y); table.insert(rz, p.z - d.z)
+                end
+                ImPlot3D.PlotLine("Placed Rays", rx, ry, rz, #rx, { Flags = LineFlags.Segments })
+            end
+            ImPlot3D.EndPlot()
+        end
+    end
+
     -- @@TAIL@@
 end
