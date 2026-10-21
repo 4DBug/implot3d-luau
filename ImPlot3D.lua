@@ -255,6 +255,7 @@ return function(G)
         function internal.ImHasFlag(set, flag) return bit32.band(set, flag) == flag end
         local DBL_MAX = G.DBL_MAX
         -- Returns true if val is NAN or INFINITY
+        @native
         function internal.ImNanOrInf(val) return not (val >= -DBL_MAX and val <= DBL_MAX) end
         -- Turns NANs to 0s
         function internal.ImConstrainNan(val) if val ~= val then return 0 end return val end
@@ -285,6 +286,7 @@ return function(G)
         -- ImPlot3DPoint: 3D vector to store points in 3D space
         local PointMT = {}
         local PointMethods = {}
+        @native
         local function ImPlot3DPoint(x, y, z)
             return setmetatable({ x = x or 0.0, y = y or 0.0, z = z or 0.0 }, PointMT)
         end
@@ -293,12 +295,14 @@ return function(G)
         -- Accessors
         -- [Port] operator[]: 0 -> x, 1 -> y, 2 -> z
         local idx_keys = { [0] = "x", [1] = "y", [2] = "z" }
-        PointMT.__index = function(self, k)
+        @native
+        function PointMT.__index(self, k)
             local f = idx_keys[k]
             if f then return rawget(self, f) end
             return PointMethods[k]
         end
-        PointMT.__newindex = function(self, k, v)
+        @native
+        function PointMT.__newindex(self, k, v)
             local f = idx_keys[k]
             IM_ASSERT(f ~= nil)
             rawset(self, f, v)
@@ -306,20 +310,25 @@ return function(G)
 
         -- Binary operators
         -- [Port] operator*(double) / operator*(ImPlot3DPoint) / friend operator*(double, ImPlot3DPoint) overloads
-        PointMT.__mul = function(a, b)
+        @native
+        function PointMT.__mul(a, b)
             if type(a) == "number" then return ImPlot3DPoint(a * b.x, a * b.y, a * b.z) end
             if type(b) == "number" then return ImPlot3DPoint(a.x * b, a.y * b, a.z * b) end
             return ImPlot3DPoint(a.x * b.x, a.y * b.y, a.z * b.z)
         end
-        PointMT.__div = function(a, b)
+        @native
+        function PointMT.__div(a, b)
             if type(b) == "number" then return ImPlot3DPoint(a.x / b, a.y / b, a.z / b) end
             return ImPlot3DPoint(a.x / b.x, a.y / b.y, a.z / b.z)
         end
-        PointMT.__add = function(a, b) return ImPlot3DPoint(a.x + b.x, a.y + b.y, a.z + b.z) end
-        PointMT.__sub = function(a, b) return ImPlot3DPoint(a.x - b.x, a.y - b.y, a.z - b.z) end
+        @native
+        function PointMT.__add(a, b) return ImPlot3DPoint(a.x + b.x, a.y + b.y, a.z + b.z) end
+        @native
+        function PointMT.__sub(a, b) return ImPlot3DPoint(a.x - b.x, a.y - b.y, a.z - b.z) end
 
         -- Unary operator
-        PointMT.__unm = function(a) return ImPlot3DPoint(-a.x, -a.y, -a.z) end
+        @native
+        function PointMT.__unm(a) return ImPlot3DPoint(-a.x, -a.y, -a.z) end
 
         -- Comparison operators
         PointMT.__eq = function(a, b) return a.x == b.x and a.y == b.y and a.z == b.z end
@@ -327,14 +336,17 @@ return function(G)
         PointMT.__tostring = function(a) return string.format("ImPlot3DPoint(%g, %g, %g)", a.x, a.y, a.z) end
 
         -- Dot product
+        @native
         function PointMethods:Dot(rhs) return self.x * rhs.x + self.y * rhs.y + self.z * rhs.z end
 
         -- Cross product
+        @native
         function PointMethods:Cross(rhs)
             return ImPlot3DPoint(self.y * rhs.z - self.z * rhs.y, self.z * rhs.x - self.x * rhs.z, self.x * rhs.y - self.y * rhs.x)
         end
 
         -- Get vector length
+        @native
         function PointMethods:Length() return sqrt(self.x * self.x + self.y * self.y + self.z * self.z) end
 
         -- Get vector squared length
@@ -563,7 +575,8 @@ return function(G)
 
         -- Binary operators
         -- [Port] operator*(ImPlot3DQuat) quaternion multiplication / operator*(ImPlot3DPoint) rotate a 3D point
-        QuatMT.__mul = function(q, rhs)
+        @native
+        function QuatMT.__mul(q, rhs)
             local x, y, z, w = q.x, q.y, q.z, q.w
             if getmetatable(rhs) == PointMT then
                 -- Extract vector part of the quaternion
@@ -1011,6 +1024,7 @@ return function(G)
         function CM:GetTableSize(cmap) return self.TableSizes[cmap + 1] end
         function CM:GetTableColor(cmap, idx) return self.Tables[self.TableOffsets[cmap + 1] + idx + 1] end
 
+        @native
         function CM:LerpTable(cmap, t)
             local off = self.TableOffsets[cmap + 1]
             local siz = self.TableSizes[cmap + 1]
@@ -1190,6 +1204,7 @@ return function(G)
 
         function ImPlot3D.NextColormapColor() return ImGui.ColorConvertU32ToFloat4(internal.NextColormapColorU32()) end
 
+        @native
         local function ResolveCmap(gp, cmap)
             if cmap == nil or cmap == IMPLOT3D_AUTO then cmap = gp.Style.Colormap end
             IM_ASSERT(cmap >= 0 and cmap < gp.ColormapData.Count, "Invalid colormap index!")
@@ -1211,6 +1226,7 @@ return function(G)
 
         function ImPlot3D.GetColormapColor(idx, cmap) return ImGui.ColorConvertU32ToFloat4(internal.GetColormapColorU32(idx, cmap)) end
 
+        @native
         function internal.SampleColormapU32(t, cmap)
             local gp = GImPlot3D
             cmap = ResolveCmap(gp, cmap)
@@ -1538,6 +1554,7 @@ return function(G)
             end
         end
 
+        @native
         function Axis:PlotToNDC(plt)
             if self.TransformForward ~= nil then
                 local s = self.TransformForward(plt, self.TransformData)
@@ -1606,6 +1623,7 @@ return function(G)
         function Axis:HasTickMarks() return not ImHasFlag(self.Flags, AxisFlags.NoTickMarks) end
         function Axis:IsAutoFitting() return ImHasFlag(self.Flags, AxisFlags.AutoFit) end
 
+        @native
         function Axis:ExtendFit(value)
             -- Only extend fit with values within the constraint range (log scale ignores <= 0)
             if not ImNanOrInf(value) and value >= self.ConstraintRange.Min and value <= self.ConstraintRange.Max then
@@ -1703,6 +1721,7 @@ return function(G)
         end
 
         -- Constant to convert from NDC coordinates to pixels coordinates
+        @native
         function Plot:GetViewScale()
             return math.min(self.PlotRect:GetWidth(), self.PlotRect:GetHeight()) / 1.8 * GImPlot3D.Style.ViewScaleFactor
         end
@@ -1891,6 +1910,7 @@ return function(G)
         end
 
         -- Convert a position in the plot's NDC to pixels
+        @native
         function internal.NDCToPixels(plot, point)
             local center = plot.PlotRect:GetCenter()
             local point_pix = plot:GetViewScale() * (plot.Rotation * point)
@@ -1898,6 +1918,7 @@ return function(G)
         end
 
         -- Convert a position in the plot's coordinate system to NDC
+        @native
         function internal.PlotToNDC(plot, point)
             local ndc = P(0, 0, 0)
             for i = 0, 2 do
@@ -3232,6 +3253,7 @@ return function(G)
         local HUGE = math.huge
 
         -- Indexers / Getters
+        @native
         local function GetXYZ(g, idx)
             local s, off = g.Stride, g.Offset
             local i = (if off == 0 then idx else (off + idx) % g.Count) * s + 1
@@ -3241,12 +3263,16 @@ return function(G)
             return { Xs = xs, Ys = ys, Zs = zs, Count = count, Offset = if count > 0 then internal.ImPosMod(offset or 0, count) else 0,
                 Stride = stride or 1, Get = GetXYZ }
         end
+        @native
         local function GetLoop(g, idx) local inner = g.Getter return inner.Get(inner, idx % (g.Count - 1)) end
         function internal.GetterLoop(getter) return { Getter = getter, Count = getter.Count + 1, Get = GetLoop } end
+        @native
         local function GetTriLines(g, idx) local inner = g.Getter return inner.Get(inner, ((idx % 6 + 1) // 2) % 3 + idx // 6 * 3) end
         function internal.GetterTriangleLines(getter) return { Getter = getter, Count = getter.Count * 2, Get = GetTriLines } end
+        @native
         local function GetQuadLines(g, idx) local inner = g.Getter return inner.Get(inner, ((idx % 8 + 1) // 2) % 4 + idx // 8 * 4) end
         function internal.GetterQuadLines(getter) return { Getter = getter, Count = getter.Count * 2, Get = GetQuadLines } end
+        @native
         local function GetSurfaceLines(g, idx)
             local endpoint_i, segment_i, xc = idx % 2, idx // 2, g.XCount
             local horizontal_segments = (xc - 1) * g.YCount
@@ -3267,6 +3293,7 @@ return function(G)
                 Count = ((x_count - 1) * y_count + (y_count - 1) * x_count) * 2 }
         end
         -- [Port] idx is a 1-based Lua array of 0-based vertex indices (upstream semantics)
+        @native
         local function GetMeshTri(g, i) local v = g.Getter return v.Get(v, g.Idx[i + 1]) end
         function internal.GetterMeshTriangles(vtx_getter, idx, idx_count)
             return { Getter = vtx_getter, Idx = idx, TriCount = idx_count // 3, Count = idx_count, Get = GetMeshTri }
@@ -3290,21 +3317,25 @@ return function(G)
             local c = plot.PlotRect:GetCenter()
             cx, cy = c.x, c.y
         end
+        @native
         local function Rotate(x, y, z)
             local ux, uy, uz = qy * z - qz * y, qz * x - qx * z, qx * y - qy * x
             local vx, vy, vz = qy * uz - qz * uy, qz * ux - qx * uz, qx * uy - qy * ux
             return x + 2 * (qw * ux + vx), y + 2 * (qw * uy + vy), z + 2 * (qw * uz + vz)
         end
+        @native
         local function NDC(i, v)
             local tf = ax_tf[i]
             if tf ~= nil then v = tf(v, ax_td[i]) end
             local t = (v - ax_min[i]) / ax_size[i]
             return (if ax_inv[i] then 0.5 - t else t - 0.5) * ax_ndc[i]
         end
+        @native
         local function ToPixels(x, y, z)
             local rx, ry = Rotate(NDC(0, x), NDC(1, y), NDC(2, z))
             return rx * vscale + cx, -ry * vscale + cy
         end
+        @native
         local function Depth(x, y, z)
             if ax_inv[0] then x = -x end
             if ax_inv[1] then y = -y end
@@ -3318,6 +3349,7 @@ return function(G)
         -- [Port] upstream lambda -> module-level helper on ct0/ct1 (no closure per call)
         local bx0, by0, bz0, bx1, by1, bz1 = 0, 0, 0, 0, 0, 0
         local ct0, ct1 = 0.0, 1.0
+        @native
         local function upd(p, q)
             if p == 0.0 then return q >= 0.0 end
             local r = q / p
@@ -3330,6 +3362,7 @@ return function(G)
             end
             return true
         end
+        @native
         local function Clip(x0, y0, z0, x1, y1, z1)
             if x0 >= bx0 and x0 <= bx1 and y0 >= by0 and y0 <= by1 and z0 >= bz0 and z0 <= bz1
                 and x1 >= bx0 and x1 <= bx1 and y1 >= by0 and y1 <= by1 and z1 >= bz0 and z1 <= bz1 then
@@ -3344,11 +3377,13 @@ return function(G)
 
         -- [Port] ColorConvertU32ToFloat4 -> c.w *= alpha -> ColorConvertFloat4ToU32, without the ImVec4
         local band, bor, lshift, rshift, floor = bit32.band, bit32.bor, bit32.lshift, bit32.rshift, math.floor
+        @native
         local function MulAlpha(col, alpha)
             return bor(band(col, 0x00FFFFFF), lshift(floor(rshift(col, 24) * alpha + 0.5), 24))
         end
         internal.MulAlpha = MulAlpha
 
+        @native
         local function GetCol(r, prim)
             local cols = r.Cols
             if cols == nil then return r.Col end
@@ -3357,6 +3392,7 @@ return function(G)
             return col
         end
 
+        @native
         local function PrimLine(dl, x1, y1, x2, y2, hw, col, u0, v0, u1, v1, z)
             local dx, dy = x2 - x1, y2 - y1
             local d2 = dx * dx + dy * dy
@@ -3389,6 +3425,7 @@ return function(G)
         end
 
         -- Shared segment render: clip, project, emit (P1 -> P2)
+        @native
         local function Segment(r, dl, prim, x1, y1, z1, x2, y2, z2)
             local t0, t1 = Clip(x1, y1, z1, x2, y2, z2)
             if t0 == nil then return false end
@@ -3400,6 +3437,7 @@ return function(G)
             return true
         end
 
+        @native
         local function LineStripRender(r, dl, prim)
             local g = r.Getter
             local x2, y2, z2 = g.Get(g, prim + 1)
@@ -3407,6 +3445,7 @@ return function(G)
             r.X1, r.Y1, r.Z1 = x2, y2, z2
             return vis
         end
+        @native
         local function LineStripSkipRender(r, dl, prim)
             local g = r.Getter
             local x2, y2, z2 = g.Get(g, prim + 1)
@@ -3418,6 +3457,7 @@ return function(G)
             if x2 == x2 and y2 == y2 and z2 == z2 then r.X1, r.Y1, r.Z1 = x2, y2, z2 end
             return vis
         end
+        @native
         local function LineSegmentsRender(r, dl, prim)
             local g = r.Getter
             local x1, y1, z1 = g.Get(g, prim * 2)
@@ -3437,6 +3477,7 @@ return function(G)
             return r
         end
 
+        @native
         local function MarkersFillRender(r, dl, prim)
             local g = r.Getter
             local x, y, z = g.Get(g, prim)
@@ -3466,6 +3507,7 @@ return function(G)
                 Getter = getter, Marker = marker, Count = count, Init = WhiteInit, Render = MarkersFillRender }
         end
 
+        @native
         local function MarkersLineRender(r, dl, prim)
             local g = r.Getter
             local x, y, z = g.Get(g, prim)
@@ -3486,12 +3528,15 @@ return function(G)
                 Init = LineInit, Render = MarkersLineRender }
         end
 
+        @native
         local function InBox(x, y, z) return x >= bx0 and x <= bx1 and y >= by0 and y <= by1 and z >= bz0 and z <= bz1 end
+        @native
         local function Vtx(b, o, x, y, z, u, v, col)
             local px, py = ToPixels(x, y, z)
             writef64(b, o, px); writef64(b, o + 8, py); writef64(b, o + 16, u); writef64(b, o + 24, v); writeu32(b, o + 32, col)
         end
         -- Two triangles (0,1,2) (0,2,3) for the 4 vertices just written
+        @native
         local function QuadIdx(dl, z0, z1)
             local idx, id, iw = dl._VtxCurrentIdx, dl.IdxBuffer, dl._IdxWritePtr
             id[iw] = idx; id[iw + 1] = idx + 1; id[iw + 2] = idx + 2
@@ -3501,6 +3546,7 @@ return function(G)
             dl._VtxWritePtr += 4; dl._IdxWritePtr = iw + 6; dl._VtxCurrentIdx = idx + 4; dl._ZWritePtr = zw + 2
         end
 
+        @native
         local function TriangleFillRender(r, dl, prim)
             local g, i = r.Getter, 3 * prim
             local x0, y0, z0 = g.Get(g, i)
@@ -3521,6 +3567,7 @@ return function(G)
             return { Getter = getter, Prims = getter.Count // 3, IdxConsumed = 3, VtxConsumed = 3, Init = WhiteInit, Render = TriangleFillRender }
         end
 
+        @native
         local function QuadFillRender(r, dl, prim)
             local g, i = r.Getter, 4 * prim
             local x0, y0, z0 = g.Get(g, i)
@@ -3559,6 +3606,7 @@ return function(G)
                 Render = QuadFillRender, TexRef = tex_ref, UVs = uvs, Col = col }
         end
 
+        @native
         local function SurfaceInit(r)
             WhiteInit(r)
             -- Compute min and max values for the colormap (if not solid fill)
@@ -3574,6 +3622,7 @@ return function(G)
             end
         end
         local SampleU32
+        @native
         local function SurfaceCol(r, vi, z)
             local s = r.N.Spec
             if s.FillColors ~= nil then return MulAlpha(s.FillColors[vi + 1], s.FillAlpha) end
@@ -3586,6 +3635,7 @@ return function(G)
             end
             return r.Col
         end
+        @native
         local function SurfaceFillRender(r, dl, prim)
             local xc = r.XCount
             local x, y = prim % (xc - 1), prim // (xc - 1)
@@ -3612,6 +3662,7 @@ return function(G)
         end
 
         -- [Port] color getter (GetterConstColor/GetterIdxColor) and size getter folded into renderer fields
+        @native
         function internal.RenderPrimitivesEx(r, col, cols, alpha, size, sizes)
             local plot = GImPlot3D.CurrentPlot
             local dl = plot.DrawList
@@ -4116,6 +4167,7 @@ return function(G)
         end
 
         -- Move triangles to the current window draw list, sorted by depth
+        @native
         function DL3:SortedMoveToImGuiDrawList()
             local draw_list = ImGui.GetWindowDrawList()
             local tri_count = self.ZSize
